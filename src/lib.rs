@@ -7,6 +7,9 @@
 //! let output = gtmpl::template("Finally! Some {{ . }} for Rust", "gtmpl");
 //! assert_eq!(&output.unwrap(), "Finally! Some gtmpl for Rust");
 //! ```
+
+#![allow(clippy::result_large_err)]
+
 pub mod error;
 mod exec;
 pub mod funcs;
