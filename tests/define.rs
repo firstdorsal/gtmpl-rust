@@ -1,4 +1,4 @@
-use gtmpl::{Context, Template};
+use gtmpl_ng::{Context, Template};
 use gtmpl_derive::Gtmpl;
 
 #[test]
