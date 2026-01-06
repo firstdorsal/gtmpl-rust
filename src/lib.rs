@@ -8,7 +8,15 @@
 //! assert_eq!(&output.unwrap(), "Finally! Some gtmpl for Rust");
 //! ```
 
+// Allow pre-existing clippy warnings from upstream
 #![allow(clippy::result_large_err)]
+#![allow(clippy::explicit_auto_deref)]
+#![allow(clippy::cloned_ref_to_slice_refs)]
+#![allow(clippy::iter_overeager_cloned)]
+#![allow(clippy::double_ended_iterator_last)]
+#![allow(clippy::to_string_in_format_args)]
+#![allow(clippy::needless_raw_string_hashes)]
+#![allow(clippy::doc_lazy_continuation)]
 
 pub mod error;
 mod exec;
