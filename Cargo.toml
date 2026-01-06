@@ -1,6 +1,6 @@
 [package]
 name = "gtmpl-ng"
-version = "0.7.3"
+version = "0.7.4"
 authors = ["Florian Dieminger <me@fiji-flo.de>", "Paul Colin Hennig <8d_fvfmaa-o2wf_79aqig6g2ki6-09ffkeqmyo3d@vindelicum.eu>"]
 description = "The Golang Templating Language for Rust (fork with line number fix and Helm functions)"
 license = "MIT"

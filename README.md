@@ -116,6 +116,59 @@ This is work in progress. Currently the following features are not supported:
 Even though it was never intended to extend the syntax of Golang text/template
 there might be some convenient additions:
 
+### Helm Template Functions
+
+Enable `helm-functions` to get 152 Helm-compatible template functions:
+```toml
+[dependencies.gtmpl-ng]
+version = "0.7"
+features = ["helm-functions"]
+```
+
+```rust
+use gtmpl_ng::{Template, Context};
+use gtmpl_ng::helm_functions::HELM_FUNCTIONS;
+
+fn main() {
+    let mut tmpl = Template::default();
+    tmpl.add_funcs(&HELM_FUNCTIONS);
+    tmpl.parse(r#"{{ "hello" | upper }}"#).unwrap();
+    let output = tmpl.render(&Context::empty()).unwrap();
+    assert_eq!(output, "HELLO");
+}
+```
+
+### Mows Template Functions
+
+Enable `mows-functions` to get 3 additional mows-specific functions:
+```toml
+[dependencies.gtmpl-ng]
+version = "0.7"
+features = ["mows-functions"]
+```
+
+```rust
+use gtmpl_ng::mows_functions::MOWS_FUNCTIONS;
+// mowsRandomString, mowsDigest, mowsJoindomain
+```
+
+### All Functions
+
+Enable `all-functions` to get both Helm and mows functions:
+```toml
+[dependencies.gtmpl-ng]
+version = "0.7"
+features = ["all-functions"]
+```
+
+```rust
+use gtmpl_ng::all_functions::all_functions;
+
+fn main() {
+    let funcs = all_functions(); // Vec of all 155 functions
+}
+```
+
 ### Dynamic Template
 
 Enable `gtmpl_dynamic_template` in your `Cargo.toml`:
@@ -123,7 +176,6 @@ Enable `gtmpl_dynamic_template` in your `Cargo.toml`:
 [dependencies.gtmpl-ng]
 version = "0.7"
 features = ["gtmpl_dynamic_template"]
-
 ```
 
 Now you can have dynamic template names for the `template` action.
