@@ -2,9 +2,9 @@
 //!
 //! ## Example
 //! ```rust
-//! use gtmpl;
+//! use gtmpl_ng;
 //!
-//! let output = gtmpl::template("Finally! Some {{ . }} for Rust", "gtmpl");
+//! let output = gtmpl_ng::template("Finally! Some {{ . }} for Rust", "gtmpl");
 //! assert_eq!(&output.unwrap(), "Finally! Some gtmpl for Rust");
 //! ```
 
@@ -50,7 +50,7 @@ pub use gtmpl_value::Value;
 ///
 /// ## Example
 /// ```rust
-/// let output = gtmpl::template("Finally! Some {{ . }} for Rust", "gtmpl");
+/// let output = gtmpl_ng::template("Finally! Some {{ . }} for Rust", "gtmpl");
 /// assert_eq!(&output.unwrap(), "Finally! Some gtmpl for Rust");
 /// ```
 pub fn template<T: Into<Value>>(template_str: &str, context: T) -> Result<String, TemplateError> {

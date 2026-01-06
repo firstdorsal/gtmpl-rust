@@ -142,7 +142,7 @@ macro_rules! gn {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let equal = template("{{ or 1 2.0 false . }}", "foo");
 /// assert_eq!(&equal.unwrap(), "1");
 /// ```
@@ -165,7 +165,7 @@ pub fn or(args: &[Value]) -> Result<Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let equal = template("{{ and 1 2.0 true . }}", "foo");
 /// assert_eq!(&equal.unwrap(), "foo");
 /// ```
@@ -185,7 +185,7 @@ pub fn and(args: &[Value]) -> Result<Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let equal = template("{{ not 0 }}", "");
 /// assert_eq!(&equal.unwrap(), "true");
 /// ```
@@ -201,7 +201,7 @@ pub fn not(args: &[Value]) -> Result<Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let equal = template("{{ len . }}", "foo");
 /// assert_eq!(&equal.unwrap(), "3");
 /// ```
@@ -227,7 +227,7 @@ pub fn len(args: &[Value]) -> Result<Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::{gtmpl_fn, template, Value};
+/// use gtmpl_ng::{gtmpl_fn, template, Value};
 /// use gtmpl_value::{FuncError, Function};
 ///
 /// gtmpl_fn!(
@@ -256,7 +256,7 @@ pub fn call(args: &[Value]) -> Result<Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let equal = template(r#"{{ print "Hello " . "!" }}"#, "world");
 /// assert_eq!(&equal.unwrap(), "Hello world!");
 /// ```
@@ -286,7 +286,7 @@ pub fn print(args: &[Value]) -> Result<Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let equal = template(r#"{{ println "Hello" . "!" }}"#, "world");
 /// assert_eq!(&equal.unwrap(), "Hello world !\n");
 /// ```
@@ -325,7 +325,7 @@ pub fn println(args: &[Value]) -> Result<Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let equal = template(r#"{{ printf "%v %s %v" "Hello" . "!" }}"#, "world");
 /// assert_eq!(&equal.unwrap(), "Hello world !");
 /// ```
@@ -347,7 +347,7 @@ pub fn printf(args: &[Value]) -> Result<Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let ctx = vec![23, 42, 7];
 /// let index = template("{{ index . 1 }}", ctx);
 /// assert_eq!(&index.unwrap(), "42");
@@ -390,7 +390,7 @@ fn get_item<'a>(col: &'a Value, key: &Value) -> Result<&'a Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let url = template(r#"{{ urlquery "foo bar?" }}"#, 0);
 /// assert_eq!(&url.unwrap(), "foo%20bar%3F");
 /// ```
@@ -411,7 +411,7 @@ pub fn urlquery(args: &[Value]) -> Result<Value, FuncError> {
 ///
 /// # Example
 /// ```
-/// use gtmpl::template;
+/// use gtmpl_ng::template;
 /// let equal = template("{{ eq 1 1 . }}", 1);
 /// assert_eq!(&equal.unwrap(), "true");
 /// ```
@@ -429,7 +429,7 @@ Returns the boolean truth of arg1 != arg2
 
 # Example
 ```
-use gtmpl::template;
+use gtmpl_ng::template;
 let not_equal = template(\"{{ ne 2 . }}\", 1);
 assert_eq!(&not_equal.unwrap(), \"true\");
 ```
@@ -444,7 +444,7 @@ Returns the boolean truth of arg1 < arg2
 
 # Example
 ```
-use gtmpl::template;
+use gtmpl_ng::template;
 let less_than = template(\"{{ lt 0 . }}\", 1);
 assert_eq!(&less_than.unwrap(), \"true\");
 ```
@@ -464,7 +464,7 @@ Returns the boolean truth of arg1 <= arg2
 
 # Example
 ```
-use gtmpl::template;
+use gtmpl_ng::template;
 let less_or_equal = template(\"{{ le 1.4 . }}\", 1.4);
 assert_eq!(less_or_equal.unwrap(), \"true\");
 
@@ -487,7 +487,7 @@ Returns the boolean truth of arg1 > arg2
 
 # Example
 ```
-use gtmpl::template;
+use gtmpl_ng::template;
 let greater_than = template(\"{{ gt 1.4 . }}\", 1.2);
 assert_eq!(&greater_than.unwrap(), \"true\");
 ```
@@ -507,7 +507,7 @@ Returns the boolean truth of arg1 >= arg2
 
 # Example
 ```
-use gtmpl::template;
+use gtmpl_ng::template;
 let greater_or_equal = template(\"{{ ge 1.4 1.3 }}\", 1.2);
 assert_eq!(greater_or_equal.unwrap(), \"true\");
 

@@ -39,13 +39,13 @@ impl Template {
     /// ## Example
     ///
     /// ```rust
-    /// use gtmpl::{Context, Func, FuncError, Value};
+    /// use gtmpl_ng::{Context, Func, FuncError, Value};
     ///
     /// fn hello_world(_args: &[Value]) -> Result<Value, FuncError> {
     ///   Ok(Value::from("Hello World!"))
     /// }
     ///
-    /// let mut tmpl = gtmpl::Template::default();
+    /// let mut tmpl = gtmpl_ng::Template::default();
     /// tmpl.add_func("helloWorld", hello_world);
     /// tmpl.parse("{{ helloWorld }}").unwrap();
     /// let output = tmpl.render(&Context::empty());
@@ -62,14 +62,14 @@ impl Template {
     /// ```rust
     /// use std::collections::HashMap;
     ///
-    /// use gtmpl::{Context, Func, FuncError, Value};
+    /// use gtmpl_ng::{Context, Func, FuncError, Value};
     ///
     /// fn hello_world(_args: &[Value]) -> Result<Value, FuncError> {
     ///   Ok(Value::from("Hello World!"))
     /// }
     ///
     /// let funcs = vec![("helloWorld", hello_world as Func)];
-    /// let mut tmpl = gtmpl::Template::default();
+    /// let mut tmpl = gtmpl_ng::Template::default();
     /// tmpl.add_funcs(&funcs);
     /// tmpl.parse("{{ helloWorld }}").unwrap();
     /// let output = tmpl.render(&Context::empty());
@@ -85,7 +85,7 @@ impl Template {
     /// ## Example
     ///
     /// ```rust
-    /// let mut tmpl = gtmpl::Template::default();
+    /// let mut tmpl = gtmpl_ng::Template::default();
     /// tmpl.parse("Hello World!").unwrap();
     /// ```
     pub fn parse<T: Into<String>>(&mut self, text: T) -> Result<(), ParseError> {
@@ -103,9 +103,9 @@ impl Template {
     /// ## Example
     ///
     /// ```rust
-    /// use gtmpl::Context;
+    /// use gtmpl_ng::Context;
     ///
-    /// let mut tmpl = gtmpl::Template::default();
+    /// let mut tmpl = gtmpl_ng::Template::default();
     /// tmpl.add_template("fancy", "{{ . }}");
     /// tmpl.parse(r#"{{ template "fancy" . }}!"#).unwrap();
     /// let output = tmpl.render(&Context::from("Hello World"));
