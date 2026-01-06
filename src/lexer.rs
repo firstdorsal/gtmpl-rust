@@ -251,13 +251,11 @@ impl LexerStateMachine {
 
     fn emit(&mut self, t: ItemType) {
         let s = &self.input[self.start..self.pos];
-        let lines = match t {
-            ItemType::ItemText
-            | ItemType::ItemRawString
-            | ItemType::ItemLeftDelim
-            | ItemType::ItemRightDelim => 1,
-            _ => s.chars().filter(|c| *c == '\n').count(),
-        };
+        // Count actual newlines in the token to track line numbers correctly.
+        // Previously, ItemText/ItemRawString/ItemLeftDelim/ItemRightDelim always
+        // added 1 to the line count, which was incorrect (e.g., {{ and }} contain
+        // no newlines, so they shouldn't increment the line counter).
+        let lines = s.chars().filter(|c| *c == '\n').count();
         self.items_sender
             .send(Item::new(t, self.start, s, self.line))
             .unwrap();

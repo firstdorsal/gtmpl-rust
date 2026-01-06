@@ -1,10 +1,10 @@
 [package]
 name = "gtmpl"
-version = "0.7.1"
-authors = ["Florian Dieminger <me@fiji-flo.de>"]
+version = "0.7.2"
+authors = ["Florian Dieminger <me@fiji-flo.de>", "Paul Colin Hennig"]
 description = "The Golang Templating Language for Rust"
 license = "MIT"
-repository = "https://github.com/fiji-flo/gtmpl-rust"
+repository = "https://github.com/firstdorsal/gtmpl-rust"
 documentation = "https://docs.rs/crate/gtmpl"
 keywords = ["golang", "template", "templating"]
 categories = ["template-engine"]

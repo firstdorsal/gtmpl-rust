@@ -891,7 +891,7 @@ mod tests_mocked {
         let r = p.parse_tree();
         assert_eq!(
             r.err().unwrap().to_string(),
-            "template: foo:2:function eq not defined"
+            "template: foo:1:function eq not defined"
         );
         let funcs = &["eq"];
         let mut p = make_parser_with_funcs(r#"{{ if eq .foo "bar" }} 2000 {{ end }}"#, funcs);
