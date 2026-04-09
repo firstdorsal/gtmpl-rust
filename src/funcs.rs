@@ -527,22 +527,39 @@ ge(a: ref Value, b: ref Value) -> Result<Value, FuncError> {
 fn cmp(left: &Value, right: &Value) -> Option<Ordering> {
     match (left, right) {
         (&Value::Number(ref l), &Value::Number(ref r)) => {
-            if let (Some(lf), Some(rf)) = (l.as_f64(), r.as_f64()) {
-                return lf.partial_cmp(&rf);
-            }
+            // Exact integer comparison when both sides fit in i64.
             if let (Some(li), Some(ri)) = (l.as_i64(), r.as_i64()) {
                 return li.partial_cmp(&ri);
             }
+            // Exact unsigned comparison for values outside the i64 range.
             if let (Some(lu), Some(ru)) = (l.as_u64(), r.as_u64()) {
                 return lu.partial_cmp(&ru);
             }
-            None
+            // Mixed int/float or disjoint signed/unsigned ranges: coerce
+            // both sides to f64. This is lossy for integers beyond the
+            // f64 mantissa, but matches Go's numeric-comparison semantics
+            // and — crucially — never returns `None` for an otherwise
+            // comparable pair of numbers. Previously, the function checked
+            // `as_f64` first and short-circuited `None` for any value that
+            // happened to be stored as an integer variant, so e.g.
+            // `lt 5 3.5` reported "unable to compare".
+            let lf = number_to_f64(l)?;
+            let rf = number_to_f64(r)?;
+            lf.partial_cmp(&rf)
         }
         (&Value::Bool(ref l), &Value::Bool(ref r)) => l.partial_cmp(r),
         (&Value::String(ref l), &Value::String(ref r)) => l.partial_cmp(r),
         (&Value::Array(ref l), &Value::Array(ref r)) => l.len().partial_cmp(&r.len()),
         _ => None,
     }
+}
+
+/// Convert any `Number` variant to `f64`, accepting `Num::F`, `Num::I`,
+/// and `Num::U`. Returns `None` only if the library adds a new variant.
+fn number_to_f64(n: &gtmpl_value::Number) -> Option<f64> {
+    n.as_f64()
+        .or_else(|| n.as_i64().map(|i| i as f64))
+        .or_else(|| n.as_u64().map(|u| u as f64))
 }
 
 #[cfg(test)]

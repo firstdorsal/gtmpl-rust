@@ -73,7 +73,15 @@ pub fn value_is_truthy(value: &Value) -> bool {
         Value::Object(o) => o.is_empty(),
         Value::Map(m) => m.is_empty(),
         Value::Function(_) => false,
-        Value::Number(n) => n.as_f64().unwrap() == 0.0,
+        // `gtmpl_value::Number::as_f64()` only returns `Some` for float
+        // variants, so we must also check integer variants — otherwise any
+        // integer value here would panic with `unwrap()` on `None`.
+        Value::Number(n) => n
+            .as_f64()
+            .map(|f| f == 0.0)
+            .or_else(|| n.as_i64().map(|i| i == 0))
+            .or_else(|| n.as_u64().map(|u| u == 0))
+            .unwrap_or(true),
     }
 }
 

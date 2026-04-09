@@ -43,6 +43,13 @@ pub fn unquote_str(s: &str) -> Option<String> {
 
 fn unqote(raw: &str) -> Option<(String, usize)> {
     if raw.starts_with('\\') {
+        // All recognised escape sequences have an ASCII character after the
+        // backslash, so byte index 2 must exist and be a char boundary.
+        // Without these guards `&raw[..2]` would panic on inputs like
+        // `\…` (backslash followed by a multibyte char) or a trailing `\`.
+        if raw.len() < 2 || !raw.is_char_boundary(2) {
+            return None;
+        }
         match &raw[..2] {
             r"\x" => extract_bytes_x(raw),
             r"\U" => extract_bytes_u32(raw),

@@ -178,6 +178,25 @@ pub fn substr(args: &[Value]) -> Result<Value, FuncError> {
         3,
     ))?;
     let value = value.to_string();
+    // Validate indices before slicing. Without these checks, `&value[start..end]`
+    // would panic on out-of-bounds, inverted ranges, or non-char-boundary slices
+    // (e.g., slicing in the middle of a multibyte character).
+    if start > end {
+        return Err(FuncError::Generic(format!(
+            "substr: start ({start}) must be <= end ({end})"
+        )));
+    }
+    if end > value.len() {
+        return Err(FuncError::Generic(format!(
+            "substr: end index {end} out of bounds for string of length {}",
+            value.len()
+        )));
+    }
+    if !value.is_char_boundary(start) || !value.is_char_boundary(end) {
+        return Err(FuncError::Generic(
+            "substr: index is not on a UTF-8 character boundary".to_string(),
+        ));
+    }
     let value = &value[start..end];
     Ok(Value::from(value))
 }
@@ -198,23 +217,40 @@ pub fn trunc(args: &[Value]) -> Result<Value, FuncError> {
         2,
     ))?;
     let trunc_index = trunc_index.to_string();
-    let negative = trunc_index.starts_with('-');
-    let trunc_index = trunc_index.parse::<usize>().map_err(|_| {
-        FuncError::Generic("Invalid number. Number must be a positive integer".to_string())
+    // Parse as i64 so that negative indices (Sprig/Helm semantics: trunc the
+    // *last* N bytes when N is negative) are supported; the previous code
+    // parsed as usize which made the `negative` branch dead.
+    let trunc_index: i64 = trunc_index.parse().map_err(|_| {
+        FuncError::Generic("Invalid number. Number must be an integer".to_string())
     })?;
     let value = &args.get(1).ok_or(FuncError::ExactlyXArgs(
         "This function requires exactly 2 arguments.".to_string(),
         2,
     ))?;
-    let mut value = value.to_string();
+    let value = value.to_string();
 
-    if negative {
-        value = String::from(&value[value.len() - trunc_index..]);
+    // If the request exceeds the string length, fall back to the full string
+    // (matching Sprig's `trunc` behaviour and avoiding byte-index panics).
+    let (lo, hi) = if trunc_index < 0 {
+        let n = (-trunc_index) as usize;
+        if n >= value.len() {
+            return Ok(Value::from(value));
+        }
+        (value.len() - n, value.len())
     } else {
-        value = String::from(&value[..trunc_index]);
-    }
+        let n = trunc_index as usize;
+        if n >= value.len() {
+            return Ok(Value::from(value));
+        }
+        (0, n)
+    };
 
-    Ok(Value::from(value))
+    if !value.is_char_boundary(lo) || !value.is_char_boundary(hi) {
+        return Err(FuncError::Generic(
+            "trunc: index is not on a UTF-8 character boundary".to_string(),
+        ));
+    }
+    Ok(Value::from(&value[lo..hi]))
 }
 
 pub fn abbrev(args: &[Value]) -> Result<Value, FuncError> {
@@ -231,11 +267,24 @@ pub fn abbrev(args: &[Value]) -> Result<Value, FuncError> {
         "This function requires exactly 2 arguments.".to_string(),
         2,
     ))?;
-    let mut value = value.to_string();
+    let value = value.to_string();
 
-    value = String::from(&value[..max_length - 3]);
-    value.push_str("...");
-    Ok(Value::from(value))
+    // Sprig semantics: an abbreviation needs at least 4 chars ("x..."), and
+    // if the input already fits in max_length we return it unchanged. Without
+    // these guards, the old `max_length - 3` subtraction underflowed usize,
+    // and `&value[..max_length - 3]` panicked for long `max_length`.
+    if max_length < 4 || value.len() <= max_length {
+        return Ok(Value::from(value));
+    }
+    let cut = max_length - 3;
+    if !value.is_char_boundary(cut) {
+        return Err(FuncError::Generic(
+            "abbrev: cut point is not on a UTF-8 character boundary".to_string(),
+        ));
+    }
+    let mut out = String::from(&value[..cut]);
+    out.push_str("...");
+    Ok(Value::from(out))
 }
 
 pub fn abbrevboth(args: &[Value]) -> Result<Value, FuncError> {
@@ -263,9 +312,27 @@ pub fn abbrevboth(args: &[Value]) -> Result<Value, FuncError> {
     ))?;
     let value = value.to_string();
 
+    // Needs room for "..." on each side, so max_length must be at least 7 for
+    // any non-trivial abbreviation. Short inputs or undersized max_length
+    // return the original value. These guards prevent the previous
+    // `max_length - 3` underflow and out-of-bounds slice.
+    if max_length < 7 || value.len() <= max_length {
+        return Ok(Value::from(value));
+    }
+    let end = max_length - 3;
+    if left_offset >= end || end > value.len() {
+        return Err(FuncError::Generic(format!(
+            "abbrevboth: invalid range {left_offset}..{end} for string of length {}",
+            value.len()
+        )));
+    }
+    if !value.is_char_boundary(left_offset) || !value.is_char_boundary(end) {
+        return Err(FuncError::Generic(
+            "abbrevboth: index is not on a UTF-8 character boundary".to_string(),
+        ));
+    }
     let mut out = String::from("...");
-    out.push_str(&value[left_offset..max_length - 3]);
-
+    out.push_str(&value[left_offset..end]);
     out.push_str("...");
     Ok(Value::from(out))
 }
