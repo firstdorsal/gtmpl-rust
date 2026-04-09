@@ -385,7 +385,11 @@ mod tests {
     #[test]
     fn test_math_add_returns_number_not_string() {
         let result = math_add(&[Value::Number(3.into()), Value::Number(5.into())]).unwrap();
-        assert!(matches!(result, Value::Number(_)), "expected Number, got {:?}", result);
+        assert!(
+            matches!(result, Value::Number(_)),
+            "expected Number, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -494,7 +498,9 @@ mod tests {
         let result = addf(&[Value::Number(1.5.into()), Value::Number(3.7.into())]).unwrap();
         match result {
             Value::Number(n) => {
-                let f = n.as_f64().expect("addf with fractional result must expose f64");
+                let f = n
+                    .as_f64()
+                    .expect("addf with fractional result must expose f64");
                 assert!((f - 5.2).abs() < 1e-9, "got {}", f);
             }
             _ => panic!("expected Number, got {:?}", result),

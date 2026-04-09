@@ -62,15 +62,9 @@ pub fn random_string(args: &[Value]) -> Result<Value, FuncError> {
         2,
     ))?;
 
-    let length: u16 = length
-        .to_string()
-        .replace(' ', "")
-        .parse()
-        .map_err(|_| {
-            FuncError::Generic(
-                "randomString: length must be an integer in 0..=65535".to_string(),
-            )
-        })?;
+    let length: u16 = length.to_string().replace(' ', "").parse().map_err(|_| {
+        FuncError::Generic("randomString: length must be an integer in 0..=65535".to_string())
+    })?;
 
     let mut charset: Vec<u8> = b"".to_vec();
     if method.contains('A') {
@@ -89,8 +83,7 @@ pub fn random_string(args: &[Value]) -> Result<Value, FuncError> {
     // charset explicitly instead of crashing.
     if charset.is_empty() {
         return Err(FuncError::Generic(
-            "randomString: method must contain at least one of 'A', 'a', '0', '%'"
-                .to_string(),
+            "randomString: method must contain at least one of 'A', 'a', '0', '%'".to_string(),
         ));
     }
     let mut rng = rand::rng();

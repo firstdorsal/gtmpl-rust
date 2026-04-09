@@ -220,9 +220,9 @@ pub fn trunc(args: &[Value]) -> Result<Value, FuncError> {
     // Parse as i64 so that negative indices (Sprig/Helm semantics: trunc the
     // *last* N bytes when N is negative) are supported; the previous code
     // parsed as usize which made the `negative` branch dead.
-    let trunc_index: i64 = trunc_index.parse().map_err(|_| {
-        FuncError::Generic("Invalid number. Number must be an integer".to_string())
-    })?;
+    let trunc_index: i64 = trunc_index
+        .parse()
+        .map_err(|_| FuncError::Generic("Invalid number. Number must be an integer".to_string()))?;
     let value = &args.get(1).ok_or(FuncError::ExactlyXArgs(
         "This function requires exactly 2 arguments.".to_string(),
         2,

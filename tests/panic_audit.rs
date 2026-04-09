@@ -150,11 +150,7 @@ fn coalesce_with_integers_does_not_panic() {
 fn ternary_with_integer_condition_does_not_panic() {
     let mut ctx: HashMap<String, Value> = HashMap::new();
     ctx.insert("cond".to_string(), Value::from(1i64));
-    let out = render(
-        r#"{{ ternary "yes" "no" .cond }}"#,
-        Value::from(ctx),
-    )
-    .unwrap();
+    let out = render(r#"{{ ternary "yes" "no" .cond }}"#, Value::from(ctx)).unwrap();
     // Helm ternary returns the first arg when condition is truthy.
     assert_eq!(out, "yes");
 }
@@ -213,11 +209,7 @@ fn add_integer_from_json_produces_integer() {
 
 #[test]
 fn add_integer_from_yaml_produces_integer() {
-    let out = render(
-        r#"{{ $d := fromYaml "n: 5" }}{{ add $d.n 3 }}"#,
-        Value::Nil,
-    )
-    .unwrap();
+    let out = render(r#"{{ $d := fromYaml "n: 5" }}{{ add $d.n 3 }}"#, Value::Nil).unwrap();
     assert_eq!(out, "8");
 }
 
@@ -251,11 +243,7 @@ fn math_pipeline_with_default_does_not_panic_on_integer_context() {
     // This is the exact shape that previously crashed `value_is_truthy`.
     let mut ctx: HashMap<String, Value> = HashMap::new();
     ctx.insert("count".to_string(), Value::from(3i64));
-    let out = render(
-        r#"{{ .count | default 1 | add 10 }}"#,
-        Value::from(ctx),
-    )
-    .unwrap();
+    let out = render(r#"{{ .count | default 1 | add 10 }}"#, Value::from(ctx)).unwrap();
     assert_eq!(out, "13");
 }
 
@@ -290,10 +278,7 @@ mod mows {
     fn random_string_empty_method_returns_error_not_panic() {
         // Previously panicked in `rng.random_range(0..0)` because the
         // charset stayed empty.
-        let result = random_string(&[
-            Value::String("".to_string()),
-            Value::Number(10.into()),
-        ]);
+        let result = random_string(&[Value::String("".to_string()), Value::Number(10.into())]);
         assert!(result.is_err(), "expected error, got {:?}", result);
     }
 }
