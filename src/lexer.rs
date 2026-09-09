@@ -38,6 +38,7 @@ pub enum ItemType {
     ItemChar,         // printable ASCII character; grab bag for comma etc.
     ItemCharConstant, // character constant
     ItemComplex,      // complex constant (1+2i); imaginary is just a number
+    ItemAssign,       // assignment to an existing variable
     ItemColonEquals,  // colon-equals (':=') introducing a declaration
     ItemEOF,
     ItemField,      // alphanumeric identifier starting with '.'
@@ -483,6 +484,10 @@ impl LexerStateMachine {
                             return self.errorf(&format!("unexpected right paren {}", c));
                         }
                         self.paren_depth -= 1;
+                        State::LexInsideAction
+                    }
+                    '=' => {
+                        self.emit(ItemType::ItemAssign);
                         State::LexInsideAction
                     }
                     ':' => match self.next() {
