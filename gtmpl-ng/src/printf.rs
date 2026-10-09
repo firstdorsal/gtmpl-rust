@@ -480,6 +480,58 @@ mod test {
         check("%d", &[Value::from(3.5)], "%!d(float64=3.5)");
     }
 
+    /// A width or precision close to Go's million-digit cap, which produces a
+    /// megabyte of output -- too large for the conformance fixture, so it is asserted
+    /// here by length and edges against the same Go 1.26.8 run.
+    ///
+    /// These used to take the process down: the value was used as an allocation size
+    /// with no upper bound, and Rust's own formatter refuses a precision above
+    /// `u16::MAX`, which Go goes well past.
+    #[test]
+    fn a_precision_near_gos_cap_matches_go() {
+        // Lengths and edges from the same Go 1.26.8 run.
+        for (format, length, first, last) in [
+            ("%.1000001f", 1_000_003, "1.5000", "000000"),
+            ("%.1000000e", 1_000_006, "1.5000", "00e+00"),
+            ("%.70000f", 70_002, "1.5000", "000000"),
+            ("%.70000e", 70_006, "1.5000", "00e+00"),
+        ] {
+            let rendered = sprintf(format, &[Value::from(1.5)]);
+            assert_eq!(rendered.len(), length, "{}", format);
+            assert!(rendered.starts_with(first), "{}", format);
+            assert!(rendered.ends_with(last), "{}", format);
+        }
+        for (format, length) in [("%1000001d", 1_000_001), ("%1000000d", 1_000_000)] {
+            let rendered = sprintf(format, &[1.into()]);
+            assert_eq!(rendered.len(), length, "{}", format);
+            assert!(rendered.starts_with("      "), "{}", format);
+            assert!(rendered.ends_with("     1"), "{}", format);
+        }
+
+        // One digit further and Go stops reading the width, so the verb is never
+        // reached and the argument is left over.
+        assert_eq!(
+            sprintf("%1000000000d", &[1.into()]),
+            "%!(NOVERB)%!(EXTRA int=1)"
+        );
+        assert_eq!(
+            sprintf("%.18446744073709551615d", &[1.into()]),
+            "%!(NOVERB)%!(EXTRA int=1)"
+        );
+        // And an out-of-range `*` is reported rather than allocated for.
+        assert_eq!(
+            sprintf("%*d", &[1_000_000_000.into(), 1.into()]),
+            "%!(BADWIDTH)1"
+        );
+        assert_eq!(
+            sprintf(
+                "%.*f",
+                &[9_223_372_036_854_775_807i64.into(), Value::from(1.5)]
+            ),
+            "%!(BADPREC)1.500000"
+        );
+    }
+
     // `3.14159` is a Go reference value, not pi.
     #[allow(clippy::approx_constant)]
     #[test]
