@@ -5,6 +5,25 @@ use crate::lexer::{Item, ItemType, Lexer};
 use crate::node::*;
 use crate::utils::*;
 
+/// Length of the source span running from `start` to `end`.
+///
+/// Tokens are consumed strictly left to right, and `backup` only re-queues tokens
+/// without rewinding their recorded positions, so `end` never precedes `start`.
+fn span(start: Pos, end: Pos) -> usize {
+    debug_assert!(end >= start, "node ends before it starts");
+    end - start
+}
+
+/// Widens a list to span from its first child to the end of its last. A list is
+/// built by appending, so its extent is only known once that is done.
+fn set_list_span(list: &mut ListNode) {
+    let start = list.pos();
+    if let Some(last) = list.nodes.last() {
+        let end = last.pos() + last.len();
+        list.set_len(span(start, end));
+    }
+}
+
 pub struct Parser {
     name: String,
     pub funcs: HashSet<String>,
@@ -292,6 +311,9 @@ impl Parser {
             };
         }
         self.backup(t);
+        if let Some(Nodes::List(root)) = self.tree.as_mut().and_then(|tree| tree.root.as_mut()) {
+            set_list_span(root);
+        }
         Ok(())
     }
 
@@ -322,7 +344,10 @@ impl Parser {
         while self.peek_non_space_must("item list")?.typ != ItemType::ItemEOF {
             let node = self.text_or_action()?;
             match *node.typ() {
-                NodeType::End | NodeType::Else => return Ok((list, node)),
+                NodeType::End | NodeType::Else => {
+                    set_list_span(&mut list);
+                    return Ok((list, node));
+                }
                 _ => list.append(node),
             }
         }
@@ -362,8 +387,14 @@ impl Parser {
         let col = token.col;
         self.backup(token);
         let pipe = self.pipeline("command")?;
-        // The action spans its pipeline; both start at the same token.
-        let len = (pipe.pos() + pipe.len()).saturating_sub(pos);
+        // `pipeline` consumes the token just backed up, so it starts where the action
+        // does and the action's span is exactly the pipeline's.
+        debug_assert_eq!(
+            pipe.pos(),
+            pos,
+            "action and pipeline start at the same token"
+        );
+        let len = pipe.len();
         Ok(Nodes::Action(ActionNode::new(
             self.tree_id,
             pos,
@@ -532,7 +563,8 @@ impl Parser {
             token.pos,
             token.line,
             token.col,
-            token.val.len(),
+            // Spans the data pipeline, which is where an error here comes from.
+            span(token.pos, pipe.pos() + pipe.len()),
             PipeOrString::String(name),
             Some(pipe),
         )))
@@ -561,12 +593,18 @@ impl Parser {
         } else {
             None
         };
+        // An error inside the data pipeline is reported against this node, so the
+        // span has to cover the pipeline and not just the template name.
+        let len = match pipe.as_ref() {
+            Some(pipe) => span(token.pos, pipe.pos() + pipe.len()),
+            None => token_len,
+        };
         Ok(Nodes::Template(TemplateNode::new(
             self.tree_id,
             token.pos,
             token.line,
             token.col,
-            token_len,
+            len,
             name,
             pipe,
         )))
@@ -638,7 +676,7 @@ impl Parser {
                     // trailing space stay out of it. `check_pipeline` has already
                     // rejected an empty pipeline.
                     if let Some(last) = pipe.cmds.last() {
-                        pipe.set_len((last.pos() + last.len()).saturating_sub(pipe.pos()));
+                        pipe.set_len(span(pipe.pos(), last.pos() + last.len()));
                     }
                     if token.typ == ItemType::ItemRightParen {
                         self.backup(token);
@@ -721,7 +759,7 @@ impl Parser {
             return self.error("empty command");
         }
         if let Some(last) = cmd.args.last() {
-            cmd.set_len((last.pos() + last.len()).saturating_sub(cmd.pos()));
+            cmd.set_len(span(cmd.pos(), last.pos() + last.len()));
         }
         Ok(cmd)
     }
@@ -745,11 +783,18 @@ impl Parser {
                         }
                         _ => {}
                     };
+                    // The chain expression starts at its base term, not at the first
+                    // dot, so the node is anchored there -- otherwise `pos` would
+                    // point into the middle of the expression while `len` measured
+                    // from its start, and the two would describe different spans.
+                    let base_pos = n.pos();
+                    let base_line = n.line();
+                    let base_col = n.col();
                     let mut chain = ChainNode::new(
                         self.tree_id,
-                        next.pos,
-                        next.line,
-                        next.col,
+                        base_pos,
+                        base_line,
+                        base_col,
                         next.val.len(),
                         n,
                     );
@@ -768,26 +813,23 @@ impl Parser {
                         chain.add(&field.val);
                     }
                     let chain_str = chain.to_string();
-                    let orig_line = chain.node.line();
-                    let orig_col = chain.node.col();
-                    let orig_pos = chain.node.pos();
-                    let full_len = chain_end.saturating_sub(orig_pos);
-                    chain.set_len(full_len);
+                    let chain_len = span(base_pos, chain_end);
+                    chain.set_len(chain_len);
                     let n = match typ {
                         NodeType::Field => Nodes::Field(FieldNode::new(
                             self.tree_id,
-                            orig_pos,
-                            orig_line,
-                            orig_col,
-                            full_len,
+                            base_pos,
+                            base_line,
+                            base_col,
+                            chain_len,
                             &chain_str,
                         )),
                         NodeType::Variable => Nodes::Variable(VariableNode::new(
                             self.tree_id,
-                            orig_pos,
-                            orig_line,
-                            orig_col,
-                            full_len,
+                            base_pos,
+                            base_line,
+                            base_col,
+                            chain_len,
                             &chain_str,
                         )),
                         _ => Nodes::Chain(chain),

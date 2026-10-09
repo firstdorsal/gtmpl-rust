@@ -135,6 +135,15 @@ macro_rules! node {
             tr: TreeId,
             $(pub $field: $typ,)*
         }
+        impl $name {
+            /// Widens this node's recorded source span once its extent is known. A
+            /// node that is built incrementally cannot know its span at construction
+            /// time: it ends at the last token the node consumes, which is only
+            /// reached after its children are parsed.
+            pub fn set_len(&mut self, len: usize) {
+                self.len = len;
+            }
+        }
         impl Node for $name {
             fn typ(&self) -> &NodeType {
                 &self.typ
@@ -255,13 +264,6 @@ node!(
 );
 
 impl PipeNode {
-    /// Widens this node's recorded source span once its extent is known. The span
-    /// cannot be set at construction time: it ends at the last token the node
-    /// consumes, which is only reached after its children are parsed.
-    pub fn set_len(&mut self, len: usize) {
-        self.len = len;
-    }
-
     pub fn new(
         tr: TreeId,
         pos: Pos,
@@ -354,13 +356,6 @@ node!(
 );
 
 impl CommandNode {
-    /// Widens this node's recorded source span once its extent is known. The span
-    /// cannot be set at construction time: it ends at the last token the node
-    /// consumes, which is only reached after its children are parsed.
-    pub fn set_len(&mut self, len: usize) {
-        self.len = len;
-    }
-
     pub fn new(tr: TreeId, pos: Pos, line: usize, col: usize, len: usize) -> CommandNode {
         CommandNode {
             typ: NodeType::Command,
@@ -419,11 +414,6 @@ impl IdentifierNode {
 
     pub fn set_col(&mut self, col: usize) -> &IdentifierNode {
         self.col = col;
-        self
-    }
-
-    pub fn set_len(&mut self, len: usize) -> &IdentifierNode {
-        self.len = len;
         self
     }
 
@@ -564,13 +554,6 @@ node!(
 );
 
 impl ChainNode {
-    /// Widens this node's recorded source span once its extent is known. The span
-    /// cannot be set at construction time: it ends at the last token the node
-    /// consumes, which is only reached after its children are parsed.
-    pub fn set_len(&mut self, len: usize) {
-        self.len = len;
-    }
-
     pub fn new(
         tr: TreeId,
         pos: Pos,

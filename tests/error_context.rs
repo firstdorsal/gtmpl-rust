@@ -93,6 +93,37 @@ fn the_context_spans_control_pipelines() {
     );
 }
 
+/// A chain whose base is not a field or a variable -- a parenthesized pipeline, say --
+/// is anchored at that base, so its position and length describe the same span.
+#[test]
+fn the_context_spans_a_chain_rooted_at_an_expression() {
+    assert_eq!(offending_text("{{(.a).nope}}"), "(.a).nope");
+    assert_eq!(
+        offending_text("{{(.scalar).nope.deep}}"),
+        "(.scalar).nope.deep"
+    );
+}
+
+/// `template` and `block` carry a data pipeline, and an error in it is reported
+/// against them, so their span has to cover it rather than just the name.
+#[test]
+fn the_context_spans_a_template_data_pipeline() {
+    assert_eq!(
+        offending_text("{{define \"f\"}}{{.}}{{end}}{{template \"f\" .scalar.nope}}"),
+        "\"f\" .scalar.nope"
+    );
+    assert_eq!(
+        offending_text("{{block \"b\" .scalar.nope}}{{.}}{{end}}"),
+        "\"b\" .scalar.nope"
+    );
+}
+
+/// Trim markers with more than one space do not widen the span.
+#[test]
+fn the_context_ignores_trim_marker_whitespace() {
+    assert_eq!(offending_text("{{-  .scalar.nope  -}}"), ".scalar.nope");
+}
+
 /// The line number and column survive leading lines and text.
 #[test]
 fn the_context_reports_the_right_line_and_column() {
