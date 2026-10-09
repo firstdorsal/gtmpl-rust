@@ -153,13 +153,14 @@ impl Position {
 
     /// 1-based line and column of `offset`.
     fn at(&mut self, input: &str, offset: Pos) -> (usize, usize) {
-        if offset < self.offset {
-            // A rewind, which only happens on an error path. Start over rather than
-            // walk backwards.
-            self.offset = 0;
-            self.line = 1;
-            self.line_start = 0;
-        }
+        // Offsets only ever move forward: every caller passes `self.start`, which is
+        // assigned from `self.pos` after the scan has already advanced past it.
+        debug_assert!(
+            offset >= self.offset,
+            "position asked to walk backwards, from {} to {}",
+            self.offset,
+            offset
+        );
         for (index, c) in input[self.offset..offset].char_indices() {
             if c == '\n' {
                 self.line += 1;
@@ -592,7 +593,9 @@ impl LexerStateMachine {
                     _ => RIGHT_DELIM.starts_with(c),
                 }
             }
-            None => false,
+            // Go counts end of input as a terminator, so an unclosed action is
+            // reported as exactly that rather than as a bad character.
+            None => true,
         }
     }
 
@@ -662,13 +665,14 @@ impl LexerStateMachine {
             self.accept("+-");
             self.accept_run(DECIMAL);
         }
-        if digits == HEXADECIMAL && self.accept("pP") {
-            self.accept("+-");
-            self.accept_run(DECIMAL);
-        }
-
+        // Go also takes a `p` exponent on a hexadecimal float. Scanning one here
+        // without being able to evaluate it would only turn a clear lexer error into
+        // a confusing parse error, so it stays unsupported on both sides.
         // Let's ignore imaginary numbers for now.
-        if self.peek().map(|c| c.is_alphanumeric()).unwrap_or(true) {
+        //
+        // End of input ends the number, as in Go: treating it as another character
+        // reports a bad number where the real problem is the missing `}}`.
+        if self.peek().map(|c| c.is_alphanumeric()).unwrap_or(false) {
             self.next();
             return false;
         }
@@ -707,16 +711,21 @@ impl LexerStateMachine {
     }
 }
 
+/// Byte length of the trailing run of whitespace in `s`.
+///
+/// Measured from the *end* of the last non-space character. Measuring from its start
+/// and adding one assumes every character is a single byte, which puts the trim
+/// position inside a multi-byte character and panics the next slice.
 fn rtrim_len(s: &str) -> usize {
-    match s.rfind(|c: char| !c.is_whitespace()) {
-        Some(i) => s.len() - 1 - i,
+    match s.char_indices().rev().find(|(_, c)| !is_space(*c)) {
+        Some((index, c)) => s.len() - (index + c.len_utf8()),
         None => s.len(),
     }
 }
 
+/// Byte length of the leading run of whitespace in `s`.
 fn ltrim_len(s: &str) -> usize {
-    let l = s.len();
-    s.find(|c: char| !c.is_whitespace()).unwrap_or(l)
+    s.find(|c: char| !is_space(c)).unwrap_or(s.len())
 }
 
 #[cfg(test)]

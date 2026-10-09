@@ -10,6 +10,7 @@ fn fixture() -> Value {
     let mut root = HashMap::new();
     root.insert("aaaa".to_owned(), Value::from(7));
     root.insert("a".to_owned(), Value::from(7));
+    root.insert("scalar2".to_owned(), Value::from(7));
     root.insert("scalar".to_owned(), Value::from(7));
     Value::Map(root)
 }
@@ -116,6 +117,19 @@ fn the_context_spans_a_template_data_pipeline() {
         offending_text("{{block \"b\" .scalar.nope}}{{.}}{{end}}"),
         "\"b\" .scalar.nope"
     );
+}
+
+/// A chain on a parenthesised term is anchored at the `(`, so position and length
+/// describe the same text. As the first word of a command the action's own span hid
+/// this; as a later argument the chain's span is what gets reported.
+#[test]
+fn the_context_spans_a_parenthesised_term() {
+    assert_eq!(offending_text("{{printf \"%v\" (.a).nope}}"), "(.a).nope");
+    assert_eq!(
+        offending_text("{{printf \"%v\" (.scalar).nope.deep}}"),
+        "(.scalar).nope.deep"
+    );
+    assert_eq!(offending_text("{{(.a).nope}}"), "(.a).nope");
 }
 
 /// Trim markers with more than one space do not widen the span.

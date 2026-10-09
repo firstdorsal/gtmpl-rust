@@ -69,11 +69,18 @@ fn an_action_may_span_lines() {
     );
     assert_eq!(render("{{ if\n.a\n}}yes{{ end }}").as_deref(), Ok("yes"));
 
-    assert!(render("{{ .a").is_err(), "unterminated action");
-    assert!(
-        render("{{ .a\n").is_err(),
-        "unterminated action with a newline"
-    );
+    // Running out of input is an unclosed action, whatever the last token was. These
+    // used to report a bad character instead, with a NUL byte in the message, and an
+    // `is_err()` assertion could not tell the difference.
+    for source in ["{{ .a", "{{.a", "{{ printf", "{{ .a\n", "{{ 1"] {
+        let error = render(source).expect_err("should not parse");
+        assert!(
+            error.contains("unclosed action"),
+            "{:?} gave {:?}",
+            source,
+            error
+        );
+    }
 }
 
 /// A right marker trims on its own, with no left marker in the action.

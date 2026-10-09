@@ -123,8 +123,12 @@ pub struct NodeSpan {
 }
 
 impl NodeSpan {
-    /// A span covering a single token.
-    pub fn token(tree: TreeId, pos: Pos, line: usize, col: usize, len: usize) -> NodeSpan {
+    /// A span from an explicit position and length.
+    ///
+    /// Usually that is one lexer token, but it is also how an already-known span is
+    /// repackaged -- a control's span taken from its pipeline, say, which covers as
+    /// many tokens as the pipeline does.
+    pub fn at(tree: TreeId, pos: Pos, line: usize, col: usize, len: usize) -> NodeSpan {
         NodeSpan {
             tree,
             pos,
@@ -206,15 +210,6 @@ node!(
 );
 
 impl ListNode {
-    /// Records the span now that the children are parsed and the extent is known.
-    /// Consuming `self` makes this a step in building the node rather than a mutation
-    /// that could be repeated, forgotten, or applied at the wrong moment.
-    pub fn finish(mut self, end: Pos) -> Self {
-        debug_assert!(end >= self.pos, "node ends before it starts");
-        self.len = end - self.pos;
-        self
-    }
-
     pub fn append(&mut self, n: Nodes) {
         self.nodes.push(n);
     }
@@ -288,12 +283,15 @@ node!(
 );
 
 impl PipeNode {
-    /// Records the span now that the children are parsed and the extent is known.
-    /// Consuming `self` makes this a step in building the node rather than a mutation
-    /// that could be repeated, forgotten, or applied at the wrong moment.
-    pub fn finish(mut self, end: Pos) -> Self {
-        debug_assert!(end >= self.pos, "node ends before it starts");
-        self.len = end - self.pos;
+    /// Moves the node onto a wider span, for a term whose written form extends past
+    /// the node itself: the parentheses of a parenthesised pipeline belong to the term
+    /// but not to the pipeline inside them, and a chain built on that term has to
+    /// measure from the opening one.
+    pub fn reanchor(mut self, span: NodeSpan) -> Self {
+        self.pos = span.pos;
+        self.line = span.line;
+        self.col = span.col;
+        self.len = span.len;
         self
     }
 
@@ -389,15 +387,6 @@ node!(
 );
 
 impl CommandNode {
-    /// Records the span now that the children are parsed and the extent is known.
-    /// Consuming `self` makes this a step in building the node rather than a mutation
-    /// that could be repeated, forgotten, or applied at the wrong moment.
-    pub fn finish(mut self, end: Pos) -> Self {
-        debug_assert!(end >= self.pos, "node ends before it starts");
-        self.len = end - self.pos;
-        self
-    }
-
     pub fn new(tr: TreeId, pos: Pos, line: usize, col: usize, len: usize) -> CommandNode {
         CommandNode {
             typ: NodeType::Command,
@@ -441,18 +430,6 @@ impl IdentifierNode {
             line: span.line,
             col: span.col,
             len: span.len,
-            ident,
-        }
-    }
-
-    pub fn new(ident: String) -> IdentifierNode {
-        IdentifierNode {
-            typ: NodeType::Identifier,
-            tr: 0,
-            pos: 0,
-            line: 0,
-            col: 0,
-            len: 0,
             ident,
         }
     }
@@ -589,15 +566,6 @@ node!(
 );
 
 impl ChainNode {
-    /// Records the span now that the children are parsed and the extent is known.
-    /// Consuming `self` makes this a step in building the node rather than a mutation
-    /// that could be repeated, forgotten, or applied at the wrong moment.
-    pub fn finish(mut self, end: Pos) -> Self {
-        debug_assert!(end >= self.pos, "node ends before it starts");
-        self.len = end - self.pos;
-        self
-    }
-
     pub fn new(
         tr: TreeId,
         pos: Pos,
@@ -626,10 +594,8 @@ impl ChainNode {
 
 impl Display for ChainNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        {
-            // Handle PipeNode.
-            write!(f, "{}", self.node)
-        }?;
+        // Handle PipeNode.
+        write!(f, "{}", self.node)?;
         for field in &self.field {
             write!(f, ".{}", field)?;
         }
@@ -708,6 +674,27 @@ fn strip_digit_separators(digits: &str, after_base_prefix: bool) -> Option<Strin
     } else {
         Some(stripped)
     }
+}
+
+/// Removes `_` separators from a decimal or floating point literal, rejecting any
+/// that does not sit between two digits.
+///
+/// The integer path can get away with simpler rules because its text is all digits
+/// after the prefix; a float also contains `.`, `e` and a sign, so the neighbours
+/// have to be checked directly. Go accepts `1_0.5` but not `1._5`, `1.5_` or `1e_3`.
+fn strip_float_separators(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'_' {
+            continue;
+        }
+        let before = index.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(index + 1).copied();
+        if !matches!((before, after), (Some(b'0'..=b'9'), Some(b'0'..=b'9'))) {
+            return None;
+        }
+    }
+    Some(text.chars().filter(|c| *c != '_').collect())
 }
 
 /// Classifies `text` as a Go integer literal.
@@ -860,7 +847,10 @@ impl NumberNode {
                     let promoted = if is_i64 { as_i64 as f64 } else { as_u64 as f64 };
                     (promoted, false)
                 } else {
-                    let stripped: String = text.chars().filter(|c| *c != '_').collect();
+                    let stripped = match strip_float_separators(&text) {
+                        Some(stripped) => stripped,
+                        None => return Err(NodeError::NaN),
+                    };
                     match stripped.parse::<f64>() {
                         Ok(parsed) => (parsed, true),
                         Err(_) => return Err(NodeError::NaN),
@@ -912,6 +902,28 @@ impl NumberNode {
         }
     }
 }
+
+/// Gives a node type a one-shot `finish`, for the types that are built by appending
+/// and therefore only learn their extent once their children are parsed.
+macro_rules! finishable {
+    ($($name:ident)*) => {
+        $(
+            impl $name {
+                /// Records the span now that the children are parsed and the extent
+                /// is known. Consuming `self` makes this a step in building the node
+                /// rather than a mutation that could be repeated, forgotten, or
+                /// applied at the wrong moment.
+                pub fn finish(mut self, end: Pos) -> Self {
+                    debug_assert!(end >= self.pos, "node ends before it starts");
+                    self.len = end - self.pos;
+                    self
+                }
+            }
+        )*
+    };
+}
+
+finishable!(ListNode PipeNode CommandNode ChainNode);
 
 impl Display for NumberNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {

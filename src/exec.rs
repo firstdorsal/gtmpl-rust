@@ -401,7 +401,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     fn eval_arg(&mut self, ctx: &Context, node: &Nodes) -> Result<Value, ExecError> {
         let result = match *node {
             Nodes::Dot(_) => Ok(ctx.dot.clone()),
-            //Nodes::Nil
+            Nodes::Nil(_) => Ok(Value::Nil),
             Nodes::Field(ref n) => self.eval_field_node(ctx, n, &[], &None), // args?
             Nodes::Variable(ref n) => self.eval_variable_node(n, &[], &None),
             Nodes::Pipe(ref n) => self.eval_pipeline(ctx, n),

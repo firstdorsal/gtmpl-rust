@@ -15,6 +15,10 @@ pub struct ErrorContext {
     /// 1-based line number.
     pub line: usize,
     /// 1-based byte column of the first character of the construct.
+    ///
+    /// Go's own error text reports this column 0-based, so a message built from this
+    /// field reads one higher than the equivalent Go message. The character it points
+    /// at is the same.
     pub col: usize,
     /// Byte length of the whole construct.
     ///
@@ -102,6 +106,8 @@ pub enum ParseError {
     UnexpectedInDefineClause(Box<Nodes>),
     #[error("unexpected end")]
     UnexpectedEnd,
+    #[error("template nested more than {0} levels deep")]
+    MaxParseDepth(usize),
     #[error("template: {0}:{1}")]
     WithContext(ErrorContext, String),
     #[error("no tree")]

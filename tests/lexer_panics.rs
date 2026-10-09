@@ -45,6 +45,35 @@ fn multibyte_characters_in_an_action_do_not_panic() {
     }
 }
 
+/// Previously panicked the same way from the other side: `rtrim_len` measured the
+/// trailing whitespace a `{{-` trims as `len - 1 - index_of_last_non_space`, which
+/// assumes every character is one byte. With a multi-byte character immediately
+/// before the marker the trim position landed inside it.
+#[test]
+fn multibyte_text_before_a_left_trim_marker_does_not_panic() {
+    for (source, expected) in [
+        ("\u{e9}{{- \"x\" }}", "\u{e9}x"),
+        ("\u{e9}  {{- \"x\" }}", "\u{e9}x"),
+        ("a\u{e9}  {{- \"x\" }}", "a\u{e9}x"),
+        ("Gr\u{f6}\u{df}e{{- \"x\" }}", "Gr\u{f6}\u{df}ex"),
+        ("\u{2192}\t{{- \"x\" }}", "\u{2192}x"),
+        ("x  {{- \"y\" }}", "xy"),
+    ] {
+        let result = parse_and_render(source);
+        assert_eq!(result.as_deref(), Ok(expected), "{:?}", source);
+    }
+}
+
+/// Go trims only the four ASCII space characters around a marker, so other whitespace
+/// is text and has to survive.
+#[test]
+fn a_trim_marker_leaves_non_ascii_whitespace_alone() {
+    assert_eq!(
+        parse_and_render("a\u{a0}{{- \"x\" }}").as_deref(),
+        Ok("a\u{a0}x")
+    );
+}
+
 /// Non-ASCII text that is legal stays legal -- the fix must not reject it.
 #[test]
 fn legal_non_ascii_templates_still_render() {

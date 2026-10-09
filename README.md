@@ -125,14 +125,20 @@ Behaviour follows Go's `text/template`:
 -   **A missing map key ends a field chain** and renders as `<no value>`, however deep
     the chain is, so `{{ if .a.b.c }}` is simply false when any level is absent. A
     receiver of the wrong type still errors.
+-   **Number literals** follow Go's integer syntax: `0x1f`, `0b1010`, `0o17`, a bare
+    leading zero for octal (`017`), and `_` separators (`1_000`).
+-   **An action may span lines**, and whitespace around a trim marker may be a tab or
+    a newline as well as a space.
 
 ## Current Limitations
 
 This is work in progress. Currently the following features are not supported:
 
 -   complex numbers
--   integer literals other than decimal: hex, binary and octal evaluate wrongly
-    (see issue #5)
+-   **negative non-integer numbers are truncated** — `{{ -3.14 }}` renders `-3`, and so
+    does a `-3.14` taken from the context. The cause is in the `gtmpl_value`
+    dependency and cannot be worked around from here; see
+    [#13](https://github.com/firstdorsal/gtmpl-rust/issues/13)
 -   the following functions have not been implemented:
     -   `html`, `js`
 -   `printf` is not yet fully stable, but should support all _sane_ input

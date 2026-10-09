@@ -99,14 +99,66 @@ fn malformed_literals_are_rejected() {
     }
 }
 
+/// A separator has to sit between two digits in a float as well, so `1_0.5` is legal
+/// and `1._5` is not. The float path used to strip every `_` without looking.
+#[test]
+fn malformed_float_separators_are_rejected() {
+    for literal in ["1._5", "1.5_", "1_.5", "1e_3", "1e3_", ".5_", "1_e3"] {
+        assert!(
+            render(literal).is_err(),
+            "{} should be rejected, got {:?}",
+            literal,
+            render(literal)
+        );
+    }
+}
+
+/// A literal reaches the evaluator by a different path as a call argument than as a
+/// bare action, so both are covered.
+#[test]
+fn literals_work_as_call_arguments() {
+    for (literal, expected) in [
+        ("0x10", "16"),
+        ("017", "15"),
+        ("0b101", "5"),
+        ("1_000", "1000"),
+        ("-0x10", "-16"),
+    ] {
+        let source = format!("{{{{ printf \"%d\" {} }}}}", literal);
+        assert_eq!(
+            common::render(&source, Value::Nil).as_deref(),
+            Ok(expected),
+            "{}",
+            source
+        );
+    }
+}
+
+/// `nil` is usable as an argument, as in Go.
+#[test]
+fn nil_is_a_usable_argument() {
+    assert_eq!(
+        common::render("{{ eq nil nil }}", Value::Nil).as_deref(),
+        Ok("true")
+    );
+    assert_eq!(
+        common::render("{{ ne nil nil }}", Value::Nil).as_deref(),
+        Ok("false")
+    );
+}
+
 #[test]
 fn character_constants() {
     assert_eq!(render("'a'").as_deref(), Ok("97"));
     assert_eq!(render(r"'\n'").as_deref(), Ok("10"));
 }
 
-/// Values beyond `i64` still read correctly as unsigned. Go reports an error for these
-/// when printing; rendering the actual value is not worse.
+/// Values beyond `i64` read correctly as unsigned.
+///
+/// This is a deliberate difference, not verified-matching behaviour: real Go fails at
+/// execution time with "overflows int" for both of these. Rendering the value the
+/// source asked for is not worse, but anyone comparing this suite against Go should
+/// know it is a choice.
 #[test]
 fn values_above_the_signed_range() {
     assert_eq!(
