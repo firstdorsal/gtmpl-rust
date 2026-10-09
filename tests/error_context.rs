@@ -25,7 +25,7 @@ fn offending_text(source: &str) -> String {
 
     let context = match error {
         ExecError::Structured(ref structured) => structured.context.clone(),
-        other => panic!("expected a structured error, got {other:?}"),
+        other => panic!("expected a structured error, got {:?}", other),
     };
 
     let line = source
