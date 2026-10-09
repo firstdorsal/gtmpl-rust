@@ -8,6 +8,8 @@ type Pos = usize;
 
 static LEFT_TRIM_MARKER: &str = "- ";
 static RIGHT_TRIM_MARKER: &str = " -";
+/// `RIGHT_TRIM_MARKER` followed by `RIGHT_DELIM`.
+static RIGHT_TRIM_DELIM: &str = " -}}";
 static LEFT_DELIM: &str = "{{";
 static RIGHT_DELIM: &str = "}}";
 static LEFT_COMMENT: &str = "/*";
@@ -38,6 +40,7 @@ pub enum ItemType {
     ItemChar,         // printable ASCII character; grab bag for comma etc.
     ItemCharConstant, // character constant
     ItemComplex,      // complex constant (1+2i); imaginary is just a number
+    ItemAssign,       // assignment to an existing variable
     ItemColonEquals,  // colon-equals (':=') introducing a declaration
     ItemEOF,
     ItemField,      // alphanumeric identifier starting with '.'
@@ -236,7 +239,10 @@ impl LexerStateMachine {
     }
 
     fn backup(&mut self) {
-        self.pos -= 1;
+        // `next` advanced by the character's UTF-8 width, so give back the same
+        // amount. Subtracting one byte leaves `pos` inside a multi-byte character
+        // and the next slice panics on a non-char-boundary index.
+        self.pos -= self.width;
         if self.width == 1
             && self.input[self.pos..]
                 .chars()
@@ -485,6 +491,10 @@ impl LexerStateMachine {
                         self.paren_depth -= 1;
                         State::LexInsideAction
                     }
+                    '=' => {
+                        self.emit(ItemType::ItemAssign);
+                        State::LexInsideAction
+                    }
                     ':' => match self.next() {
                         Some('=') => {
                             self.emit(ItemType::ItemColonEquals);
@@ -524,9 +534,32 @@ impl LexerStateMachine {
     }
 
     fn lex_space(&mut self) -> State {
+        // The first space was already consumed by `lex_inside_action`.
+        let mut spaces = 1;
+        let mut last_space = self.pos - self.width;
         while self.peek().map(|c| c.is_whitespace()).unwrap_or_default() {
+            last_space = self.pos;
             self.next();
+            spaces += 1;
         }
+
+        // A trim-marked right delimiter is a space followed by `-}}`, and that space
+        // belongs to the delimiter rather than to this run. `at_right_delim` only
+        // looks at the current position, so hand the space back before emitting --
+        // otherwise the `-` is lexed as a number and becomes a stray argument.
+        // The character at `last_space` is a plain space whenever the marker
+        // matches, so resetting the offset cannot undo any line bookkeeping.
+        if self.input[last_space..].starts_with(RIGHT_TRIM_DELIM) {
+            // Only reachable for a run of two or more: `lex_inside_action` already
+            // checked this exact position before entering, and for a single space
+            // `last_space` *is* that position.
+            debug_assert!(
+                spaces > 1,
+                "single space before a trim marker reached lex_space"
+            );
+            self.pos = last_space;
+        }
+
         self.emit(ItemType::ItemSpace);
         State::LexInsideAction
     }

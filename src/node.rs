@@ -135,6 +135,15 @@ macro_rules! node {
             tr: TreeId,
             $(pub $field: $typ,)*
         }
+        impl $name {
+            /// Widens this node's recorded source span once its extent is known. A
+            /// node that is built incrementally cannot know its span at construction
+            /// time: it ends at the last token the node consumes, which is only
+            /// reached after its children are parsed.
+            pub fn set_len(&mut self, len: usize) {
+                self.len = len;
+            }
+        }
         impl Node for $name {
             fn typ(&self) -> &NodeType {
                 &self.typ
@@ -249,6 +258,7 @@ impl Display for TextNode {
 node!(
     PipeNode {
         decl: Vec<VariableNode>,
+        is_assign: bool,
         cmds: Vec<CommandNode>
     }
 );
@@ -270,6 +280,7 @@ impl PipeNode {
             col,
             len,
             decl,
+            is_assign: false,
             cmds: vec![],
         }
     }
@@ -286,12 +297,13 @@ impl Display for PipeNode {
         } else {
             write!(
                 f,
-                "{} := ",
+                "{} {} ",
                 self.decl
                     .iter()
                     .map(|n| n.to_string())
                     .collect::<Vec<String>>()
-                    .join(", ")
+                    .join(", "),
+                if self.is_assign { "=" } else { ":=" }
             )
         };
         decl.and_then(|_| {
@@ -402,11 +414,6 @@ impl IdentifierNode {
 
     pub fn set_col(&mut self, col: usize) -> &IdentifierNode {
         self.col = col;
-        self
-    }
-
-    pub fn set_len(&mut self, len: usize) -> &IdentifierNode {
-        self.len = len;
         self
     }
 

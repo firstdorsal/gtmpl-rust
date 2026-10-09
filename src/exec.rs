@@ -15,10 +15,79 @@ struct Variable {
     value: Value,
 }
 
-struct State<'a, 'b, T: Write> {
+/// How a single `Value` answers a field lookup. This is the one place that decides
+/// it, so the borrowing walk and the invoking walk cannot drift apart.
+enum FieldOutcome<'v> {
+    /// The field is present and holds this value.
+    Found(&'v Value),
+    /// The receiver is absent, or a map that has no such key. Go produces an invalid
+    /// value here and every further field access on it stays invalid, however deep,
+    /// so this ends the chain and renders as `<no value>`.
+    Absent,
+}
+
+/// Resolves one field of one receiver. A struct-like receiver must have the field; a
+/// map need not; anything else cannot have fields at all.
+fn resolve_field<'v>(receiver: &'v Value, field_name: &str) -> Result<FieldOutcome<'v>, ExecError> {
+    match receiver {
+        Value::Object(object) => match object.get(field_name) {
+            Some(field) => Ok(FieldOutcome::Found(field)),
+            None => Err(ExecError::NoFieldFor(
+                field_name.to_string(),
+                receiver.clone(),
+            )),
+        },
+        Value::Map(map) => match map.get(field_name) {
+            Some(field) => Ok(FieldOutcome::Found(field)),
+            None => Ok(FieldOutcome::Absent),
+        },
+        // Reached when an earlier miss was carried here, possibly through a variable.
+        Value::NoValue => Ok(FieldOutcome::Absent),
+        _ => Err(ExecError::OnlyMapsAndObjectsHaveFields),
+    }
+}
+
+/// Outcome of walking a whole field chain through borrowed values.
+enum ChainLookup<'v> {
+    /// The chain resolved to this value; only the final value has to be cloned.
+    Found(&'v Value),
+    /// The chain ran into an absent receiver and ends as `<no value>`.
+    NoValue,
+    /// The chain reached a function-valued field, which only `eval_field` may
+    /// invoke. `at` is how many fields were already resolved, so the caller can
+    /// resume there instead of walking the prefix again.
+    Function { at: usize },
+}
+
+/// Walks a field chain without cloning the intermediate values. Resolving a field is
+/// a pure lookup, so this borrows no state and works on any receiver -- dot as well
+/// as a variable's value.
+fn lookup_field_chain<'v>(
+    receiver: &'v Value,
+    ident: &[String],
+) -> Result<ChainLookup<'v>, ExecError> {
+    let mut value = receiver;
+
+    for (index, field_name) in ident.iter().enumerate() {
+        let field = match resolve_field(value, field_name)? {
+            FieldOutcome::Found(field) => field,
+            FieldOutcome::Absent => return Ok(ChainLookup::NoValue),
+        };
+
+        if matches!(field, Value::Function(_)) {
+            return Ok(ChainLookup::Function { at: index });
+        }
+        value = field;
+    }
+
+    Ok(ChainLookup::Found(value))
+}
+
+struct State<'a, 'b, 'c, T: Write> {
     template: &'a Template,
     template_name: String,
     writer: &'b mut T,
+    root: &'c Value,
     node: Option<&'a Nodes>,
     vars: VecDeque<VecDeque<Variable>>,
     depth: usize,
@@ -46,17 +115,13 @@ impl Context {
 impl<'b> Template {
     pub fn execute<T: Write>(&self, writer: &'b mut T, data: &Context) -> Result<(), ExecError> {
         let mut vars: VecDeque<VecDeque<Variable>> = VecDeque::new();
-        let mut dot = VecDeque::new();
-        dot.push_back(Variable {
-            name: "$".to_owned(),
-            value: data.dot.clone(),
-        });
-        vars.push_back(dot);
+        vars.push_back(VecDeque::new());
 
         let mut state = State {
             template: self,
             template_name: self.name.clone(),
             writer,
+            root: &data.dot,
             node: None,
             vars,
             depth: 0,
@@ -79,7 +144,7 @@ impl<'b> Template {
     }
 }
 
-impl<'a, 'b, T: Write> State<'a, 'b, T> {
+impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     fn wrap_error(&self, err: ExecError, node: &Nodes) -> ExecError {
         ExecError::with_context(
             &self.template_name,
@@ -90,27 +155,49 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         )
     }
 
-    fn set_kth_last_var_value(&mut self, k: usize, value: Value) -> Result<(), ExecError> {
-        if let Some(last_vars) = self.vars.back_mut() {
-            let i = last_vars.len() - k;
-            if let Some(kth_last_var) = last_vars.get_mut(i) {
-                kth_last_var.value = value;
-                return Ok(());
-            }
-            return Err(ExecError::VarContextToSmall(k));
-        }
-        Err(ExecError::EmptyStack)
-    }
-
-    fn var_value(&self, key: &str) -> Result<Value, ExecError> {
-        for context in self.vars.iter().rev() {
-            for var in context.iter().rev() {
-                if var.name == key {
-                    return Ok(var.value.clone());
+    fn assign_var(&mut self, name: &str, value: Value) -> Result<(), ExecError> {
+        for context in self.vars.iter_mut().rev() {
+            for variable in context.iter_mut().rev() {
+                if variable.name == name {
+                    variable.value = value;
+                    return Ok(());
                 }
             }
         }
+
+        // `$` is not kept in the stack -- it is read straight off the root -- but Go
+        // allows reassigning it, and the new value has to outlive the scope doing the
+        // assignment. Binding it in the outermost scope gives exactly that: later
+        // lookups find it before falling back to the root, and it survives every pop.
+        if name == "$" {
+            if let Some(outermost) = self.vars.front_mut() {
+                outermost.push_front(Variable {
+                    name: name.to_owned(),
+                    value,
+                });
+                return Ok(());
+            }
+        }
+
+        Err(ExecError::VariableNotFound(name.to_owned()))
+    }
+
+    fn var_ref(&self, key: &str) -> Result<&Value, ExecError> {
+        for context in self.vars.iter().rev() {
+            for var in context.iter().rev() {
+                if var.name == key {
+                    return Ok(&var.value);
+                }
+            }
+        }
+        if key == "$" {
+            return Ok(self.root);
+        }
         Err(ExecError::VariableNotFound(key.to_string()))
+    }
+
+    fn var_value(&self, key: &str) -> Result<Value, ExecError> {
+        self.var_ref(key).cloned()
     }
 
     fn walk_list(&mut self, ctx: &Context, node: &'a ListNode) -> Result<(), ExecError> {
@@ -164,27 +251,24 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         let tree = self.template.tree_set.get(&name);
         if let Some(tree) = tree {
             if let Some(ref root) = tree.root {
-                let mut vars = VecDeque::new();
-                let mut dot = VecDeque::new();
                 let value = if let Some(ref pipe) = template.pipe {
                     self.eval_pipeline(ctx, pipe)?
                 } else {
                     Value::NoValue
                 };
-                dot.push_back(Variable {
-                    name: "$".to_owned(),
-                    value: value.clone(),
-                });
-                vars.push_back(dot);
+                let context = Context::from(value);
+                let mut vars = VecDeque::new();
+                vars.push_back(VecDeque::new());
                 let mut new_state = State {
                     template: self.template,
                     template_name: name.clone(),
                     writer: self.writer,
+                    root: &context.dot,
                     node: None,
                     vars,
                     depth: self.depth + 1,
                 };
-                return new_state.walk(&Context::from(value), root);
+                return new_state.walk(&context, root);
             }
         }
         Err(ExecError::TemplateNotDefined(name))
@@ -198,6 +282,10 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         }
         let val = val.ok_or_else(|| ExecError::ErrorEvaluatingPipe(pipe.clone()))?;
         for var in &pipe.decl {
+            if pipe.is_assign {
+                self.assign_var(&var.ident[0], val.clone())?;
+                continue;
+            }
             self.vars
                 .back_mut()
                 .map(|v| {
@@ -334,12 +422,57 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         if n < 1 {
             return Err(ExecError::FieldChainWithoutFields);
         }
-        // TODO clean shit up
-        let mut r: Value = Value::from(0);
-        for (i, id) in ident.iter().enumerate().take(n - 1) {
-            r = self.eval_field(if i == 0 { receiver } else { &r }, id, &[], &None)?;
+
+        // Only `eval_field` may invoke a function-valued field, and a call with
+        // arguments has to go through it as well. Everything else is a pure lookup
+        // that the borrowing walk can answer without cloning anything but the result.
+        if args.len() <= 1 && fin.is_none() {
+            match lookup_field_chain(receiver, ident)? {
+                ChainLookup::Found(value) => return Ok(value.clone()),
+                ChainLookup::NoValue => return Ok(Value::NoValue),
+                ChainLookup::Function { at } => {
+                    return self.invoke_chain(receiver, ident, at, args, fin)
+                }
+            }
         }
-        self.eval_field(if n == 1 { receiver } else { &r }, &ident[n - 1], args, fin)
+
+        self.invoke_chain(receiver, ident, 0, args, fin)
+    }
+
+    /// Walks a field chain through `eval_field`, which is the only place allowed to
+    /// invoke a function-valued field and therefore needs each receiver owned.
+    ///
+    /// `from` is the index of the first field that actually needs that treatment.
+    /// Everything before it was already resolved by the borrowing walk and is known
+    /// to be function-free, so it is resolved by reference here too rather than
+    /// cloned step by step.
+    fn invoke_chain(
+        &mut self,
+        receiver: &Value,
+        ident: &[String],
+        from: usize,
+        args: &[Nodes],
+        fin: &Option<Value>,
+    ) -> Result<Value, ExecError> {
+        let n = ident.len();
+
+        let mut borrowed = receiver;
+        for field_name in ident.iter().take(from) {
+            match resolve_field(borrowed, field_name)? {
+                FieldOutcome::Found(field) => borrowed = field,
+                FieldOutcome::Absent => return Ok(Value::NoValue),
+            }
+        }
+
+        if from + 1 >= n {
+            return self.eval_field(borrowed, &ident[n - 1], args, fin);
+        }
+
+        let mut owned = self.eval_field(borrowed, &ident[from], &[], &None)?;
+        for field_name in ident.iter().take(n - 1).skip(from + 1) {
+            owned = self.eval_field(&owned, field_name, &[], &None)?;
+        }
+        self.eval_field(&owned, &ident[n - 1], args, fin)
     }
 
     fn eval_field(
@@ -349,22 +482,23 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         args: &[Nodes],
         fin: &Option<Value>,
     ) -> Result<Value, ExecError> {
-        let has_args = args.len() > 1 || fin.is_some();
-        if has_args {
+        // An absent receiver answers before the argument check, as Go does: it has no
+        // fields and no methods, so `{{.map.missing.deeper "x"}}` is `<no value>`
+        // rather than "cannot be invoked as function".
+        if matches!(receiver, Value::NoValue) {
+            return Ok(Value::NoValue);
+        }
+        if args.len() > 1 || fin.is_some() {
             return Err(ExecError::NotAFunctionButArguments(field_name.to_string()));
         }
-        let ret = match *receiver {
-            Value::Object(ref o) => o
-                .get(field_name)
-                .cloned()
-                .ok_or_else(|| ExecError::NoFieldFor(field_name.to_string(), receiver.clone())),
-            Value::Map(ref o) => Ok(o.get(field_name).cloned().unwrap_or(Value::NoValue)),
-            _ => Err(ExecError::OnlyMapsAndObjectsHaveFields),
-        };
-        if let Ok(Value::Function(ref f)) = ret {
-            return (f.f)(&[receiver.clone()]).map_err(Into::into);
+
+        match resolve_field(receiver, field_name)? {
+            FieldOutcome::Found(Value::Function(f)) => {
+                (f.f)(&[receiver.clone()]).map_err(Into::into)
+            }
+            FieldOutcome::Found(field) => Ok(field.clone()),
+            FieldOutcome::Absent => Ok(Value::NoValue),
         }
-        ret
     }
 
     fn eval_variable_node(
@@ -373,12 +507,26 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         args: &[Nodes],
         fin: &Option<Value>,
     ) -> Result<Value, ExecError> {
-        let val = self.var_value(&variable.ident[0])?;
         if variable.ident.len() == 1 {
+            let val = self.var_value(&variable.ident[0])?;
             not_a_function(args, fin)?;
             return Ok(val);
         }
-        self.eval_field_chain(&val, &variable.ident[1..], args, fin)
+
+        // Walk `$var.a.b` straight out of the variable. Going through `var_value`
+        // would clone the whole variable -- for `$` that is the entire root object --
+        // only to throw away everything but the field at the end of the chain.
+        let mut resume_at = 0;
+        if args.len() <= 1 && fin.is_none() {
+            match lookup_field_chain(self.var_ref(&variable.ident[0])?, &variable.ident[1..])? {
+                ChainLookup::Found(value) => return Ok(value.clone()),
+                ChainLookup::NoValue => return Ok(Value::NoValue),
+                ChainLookup::Function { at } => resume_at = at,
+            }
+        }
+
+        let val = self.var_value(&variable.ident[0])?;
+        self.invoke_chain(&val, &variable.ident[1..], resume_at, args, fin)
     }
 
     // Walks an `if` or `with` node. They behave the same, except that `with` sets dot.
@@ -387,30 +535,35 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
             Nodes::If(ref n) | Nodes::With(ref n) => &n.pipe,
             _ => return Err(ExecError::ExpectedIfOrWith(node.clone())),
         };
-        let val = self
-            .eval_pipeline(ctx, pipe)
-            .map_err(|e| self.wrap_error(e, node))?;
-        let truth = is_true(&val);
-        if truth {
-            match *node {
-                Nodes::If(ref n) => self.walk_list(ctx, &n.list)?,
-                Nodes::With(ref n) => {
-                    let ctx = Context { dot: val };
-                    self.walk_list(&ctx, &n.list)?;
-                }
-                _ => {}
-            }
-        } else {
-            match *node {
-                Nodes::If(ref n) | Nodes::With(ref n) => {
-                    if let Some(ref otherwise) = n.else_list {
-                        self.walk_list(ctx, otherwise)?;
+        self.vars.push_back(VecDeque::new());
+        let result = (|| {
+            let val = self
+                .eval_pipeline(ctx, pipe)
+                .map_err(|e| self.wrap_error(e, node))?;
+            let truth = is_true(&val);
+            if truth {
+                match *node {
+                    Nodes::If(ref n) => self.walk_list(ctx, &n.list)?,
+                    Nodes::With(ref n) => {
+                        let ctx = Context { dot: val };
+                        self.walk_list(&ctx, &n.list)?;
                     }
+                    _ => {}
                 }
-                _ => {}
+            } else {
+                match *node {
+                    Nodes::If(ref n) | Nodes::With(ref n) => {
+                        if let Some(ref otherwise) = n.else_list {
+                            self.walk_list(ctx, otherwise)?;
+                        }
+                    }
+                    _ => {}
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.vars.pop_back();
+        result
     }
 
     fn one_iteration(
@@ -419,39 +572,53 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         val: Value,
         range: &'a RangeNode,
     ) -> Result<(), ExecError> {
-        if !range.pipe.decl.is_empty() {
-            self.set_kth_last_var_value(1, val.clone())?;
-        }
-        if range.pipe.decl.len() > 1 {
-            self.set_kth_last_var_value(2, key)?;
+        match range.pipe.decl.as_slice() {
+            [value] => self.assign_var(&value.ident[0], val.clone())?,
+            [key_var, value] => {
+                self.assign_var(&key_var.ident[0], key)?;
+                self.assign_var(&value.ident[0], val.clone())?;
+            }
+            _ => {}
         }
         let vars = VecDeque::new();
         self.vars.push_back(vars);
         let ctx = Context { dot: val };
-        self.walk_list(&ctx, &range.list)?;
+        let result = self.walk_list(&ctx, &range.list);
         self.vars.pop_back();
-        Ok(())
+        result
     }
 
     fn walk_range(&mut self, ctx: &Context, range: &'a RangeNode) -> Result<(), ExecError> {
-        let val = self.eval_pipeline(ctx, &range.pipe)?;
-        match val {
-            Value::Object(ref map) | Value::Map(ref map) => {
-                for (k, v) in map.clone() {
-                    self.one_iteration(Value::from(k), v, range)?;
+        self.vars.push_back(VecDeque::new());
+        let result = (|| {
+            let val = self.eval_pipeline(ctx, &range.pipe)?;
+            let empty = match val {
+                Value::Object(ref map) | Value::Map(ref map) => {
+                    let mut entries: Vec<_> = map.iter().collect();
+                    entries.sort_by_key(|(key, _)| *key);
+                    for (key, value) in entries {
+                        self.one_iteration(Value::from(key.clone()), value.clone(), range)?;
+                    }
+                    map.is_empty()
+                }
+                Value::Array(ref values) => {
+                    for (index, value) in values.iter().enumerate() {
+                        self.one_iteration(Value::from(index), value.clone(), range)?;
+                    }
+                    values.is_empty()
+                }
+                Value::Nil | Value::NoValue => true,
+                _ => return Err(ExecError::InvalidRange(val)),
+            };
+            if empty {
+                if let Some(ref otherwise) = range.else_list {
+                    self.walk_list(ctx, otherwise)?;
                 }
             }
-            Value::Array(ref vec) => {
-                for (k, v) in vec.iter().enumerate() {
-                    self.one_iteration(Value::from(k), v.clone(), range)?;
-                }
-            }
-            _ => return Err(ExecError::InvalidRange(val)),
-        }
-        if let Some(ref else_list) = range.else_list {
-            self.walk_list(ctx, else_list)?;
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.vars.pop_back();
+        result
     }
 
     fn print_value(&mut self, val: &Value) -> Result<(), ExecError> {
@@ -596,6 +763,22 @@ mod tests_mocked {
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
         assert_eq!(String::from_utf8(w).unwrap(), "1");
+
+        let nested: HashMap<String, Value> = [("value".to_owned(), Value::from("nested"))].into();
+        let root: HashMap<String, Value> = [
+            ("root".to_owned(), Value::from("root")),
+            ("nested".to_owned(), Value::from(nested)),
+        ]
+        .into();
+        let data = Context::from(root);
+        let mut w = Vec::new();
+        let mut t = Template::default();
+        assert!(t
+            .parse(r#"{{with .nested}}{{$.root}}/{{.value}}{{end}}"#)
+            .is_ok());
+        let out = t.execute(&mut w, &data);
+        assert!(out.is_ok());
+        assert_eq!(String::from_utf8(w).unwrap(), "root/nested");
     }
 
     #[test]
@@ -735,12 +918,6 @@ mod tests_mocked {
         assert_eq!(String::from_utf8(w).unwrap(), "1000");
     }
 
-    fn to_sorted_string(buf: Vec<u8>) -> String {
-        let mut chars: Vec<char> = String::from_utf8(buf).unwrap().chars().collect();
-        chars.sort_unstable();
-        chars.iter().cloned().collect::<String>()
-    }
-
     #[test]
     fn test_range() {
         let mut map = HashMap::new();
@@ -752,7 +929,7 @@ mod tests_mocked {
         assert!(t.parse(r#"{{ range . -}} {{.}} {{- end }}"#).is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12");
+        assert_eq!(String::from_utf8(w).unwrap(), "12");
 
         let vec = vec!["foo", "bar", "2000"];
         let data = Context::from(vec);
@@ -788,7 +965,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12");
+        assert_eq!(String::from_utf8(w).unwrap(), "12");
 
         let mut map = HashMap::new();
         map.insert("a".to_owned(), "b");
@@ -801,7 +978,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "abcd");
+        assert_eq!(String::from_utf8(w).unwrap(), "abcd");
 
         let mut map = HashMap::new();
         map.insert("a".to_owned(), 1);
@@ -814,7 +991,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12ab");
+        assert_eq!(String::from_utf8(w).unwrap(), "a1b2");
 
         let mut map = HashMap::new();
         map.insert("a".to_owned(), 1);
@@ -832,7 +1009,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12");
+        assert_eq!(String::from_utf8(w).unwrap(), "12");
 
         let mut map = HashMap::new();
         #[derive(Gtmpl, Clone)]
@@ -849,7 +1026,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12");
+        assert_eq!(String::from_utf8(w).unwrap(), "12");
     }
 
     #[test]
