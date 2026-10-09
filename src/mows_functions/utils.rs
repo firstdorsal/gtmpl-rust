@@ -14,7 +14,7 @@ pub fn join_domain(args: &[Value]) -> Result<Value, FuncError> {
         .iter()
         .filter_map(|v| {
             // Skip nil/empty values
-            if v == &Value::Nil || v == &Value::NoValue {
+            if crate::utils::is_absent_or_nil(v) {
                 return None;
             }
             let s = v.to_string();

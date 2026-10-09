@@ -4,7 +4,7 @@ use std::io::Write;
 use crate::error::ExecError;
 use crate::node::*;
 use crate::template::Template;
-use crate::utils::is_true;
+use crate::utils::{is_absent, is_true};
 
 use gtmpl_value::{Func, Value};
 
@@ -485,7 +485,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         // An absent receiver answers before the argument check, as Go does: it has no
         // fields and no methods, so `{{.map.missing.deeper "x"}}` is `<no value>`
         // rather than "cannot be invoked as function".
-        if matches!(receiver, Value::NoValue) {
+        if is_absent(receiver) {
             return Ok(Value::NoValue);
         }
         if args.len() > 1 || fin.is_some() {

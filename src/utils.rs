@@ -116,6 +116,25 @@ fn extract_bytes_x(s: &str) -> Option<(String, usize)> {
 }
 
 /// Returns
+/// Whether `val` is *absent*: a lookup that found nothing, which Go represents as an
+/// invalid value and renders as `<no value>`.
+///
+/// Absent is not the same as nil, and the difference is load-bearing. A field access
+/// on an absent receiver yields another absent value, however deep the chain, while a
+/// field access on nil is an error -- Go draws the same line between an invalid
+/// `reflect.Value` and a nil interface. Anything deciding emptiness or truthiness,
+/// on the other hand, treats the two alike; use [`is_absent_or_nil`] there.
+pub fn is_absent(val: &Value) -> bool {
+    matches!(val, Value::NoValue)
+}
+
+/// Whether `val` carries no data, either because a lookup found nothing or because it
+/// is explicitly nil. This is the right test for emptiness and truthiness; see
+/// [`is_absent`] for the cases that have to tell the two apart.
+pub fn is_absent_or_nil(val: &Value) -> bool {
+    matches!(val, Value::NoValue | Value::Nil)
+}
+
 pub fn is_true(val: &Value) -> bool {
     match *val {
         Value::Bool(ref b) => *b,
