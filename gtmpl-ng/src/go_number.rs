@@ -108,8 +108,23 @@ pub fn read_hexadecimal_float(text: &str) -> HexadecimalFloat {
     if integer_part.is_empty() && fraction_part.is_empty() {
         return HexadecimalFloat::Illegal;
     }
-    let Ok(binary_exponent) = exponent_text.parse::<i32>() else {
-        return HexadecimalFloat::Illegal;
+    let negative_exponent = exponent_text.starts_with('-');
+    let binary_exponent = match exponent_text.parse::<i32>() {
+        Ok(exponent) => exponent,
+        Err(_) => {
+            // Either the exponent is not a number at all, or it is one no float could
+            // hold. Go only treats the overflow as a bad literal: an exponent that
+            // small underflows to zero.
+            let magnitude = exponent_text.trim_start_matches(['+', '-']);
+            if magnitude.is_empty() || !magnitude.bytes().all(|b| b.is_ascii_digit()) {
+                return HexadecimalFloat::Illegal;
+            }
+            return if negative_exponent {
+                HexadecimalFloat::Value(if negative { -0.0 } else { 0.0 })
+            } else {
+                HexadecimalFloat::Illegal
+            };
+        }
     };
 
     let mut hex_digits: Vec<u32> = Vec::with_capacity(integer_part.len() + fraction_part.len());
@@ -123,6 +138,12 @@ pub fn read_hexadecimal_float(text: &str) -> HexadecimalFloat {
     if hex_digits.iter().all(|digit| *digit == 0) {
         return HexadecimalFloat::Value(zero);
     }
+    // Leading zeros carry no value -- the exponent comes from how many digits follow
+    // the point, not from where the digits sit -- and keeping them would push the
+    // significant ones past the window kept below, leaving the sticky digit to stand
+    // for the whole number at the wrong magnitude.
+    let leading_zeros = hex_digits.iter().take_while(|digit| **digit == 0).count();
+    hex_digits.drain(..leading_zeros);
 
     // 20 hexadecimal digits are 80 bits, comfortably more than the 53 the mantissa
     // needs plus the two the rounding looks at, so a 21st digit carrying "something
@@ -167,11 +188,10 @@ pub fn read_hexadecimal_float(text: &str) -> HexadecimalFloat {
     if negative {
         exact.push('-');
     }
+    // `decimal` is non-zero here: an all-zero mantissa returned above, and multiplying
+    // a non-zero value by 16, 2 or 5 cannot reach zero.
     for digit in decimal.iter().rev().skip_while(|digit| **digit == 0) {
         exact.push((b'0' + digit) as char);
-    }
-    if exact.is_empty() || exact == "-" {
-        exact.push('0');
     }
     exact.push('e');
     exact.push_str(&decimal_exponent.to_string());
@@ -239,10 +259,40 @@ mod test {
         assert_eq!(value("0x1.8p-1074"), Some(1e-323));
     }
 
+    /// Past 20 hexadecimal digits the tail collapses into one sticky digit, which is
+    /// what keeps a long literal bounded. These are the cases where that tail decides
+    /// the rounding, so a wrong sticky bit or a wrong exponent correction shows up.
+    #[test]
+    fn a_mantissa_longer_than_the_kept_digits_still_rounds_like_go() {
+        assert_eq!(value("0x1.0000000000000000000001p0"), Some(1.0));
+        assert_eq!(
+            value("0x1.00000000000008000000001p0"),
+            Some(1.0000000000000002)
+        );
+        assert_eq!(
+            value("0x1fffffffffffffffffffffffp0"),
+            Some(9.903520314283042e27)
+        );
+        // The pair that turns on the sticky digit alone: both have the same first 20
+        // digits, and only what follows decides whether they round up.
+        assert_eq!(
+            value("0x1.fffffffffffff7ffffffffffp0"),
+            Some(1.9999999999999998)
+        );
+        assert_eq!(value("0x1.fffffffffffff8000000001p0"), Some(2.0));
+        assert_eq!(
+            value("0x123456789abcdef0123456789p0"),
+            Some(9.014404268289631e28)
+        );
+        assert_eq!(value("0x1.000000000000000000000000000001p0"), Some(1.0));
+    }
+
     #[test]
     fn underflow_and_overflow_match_go() {
         // Half of the smallest subnormal ties to even, which is zero.
         assert_eq!(value("0x1p-1075"), Some(0.0));
+        // Far enough under that the bound settles it before any arithmetic.
+        assert_eq!(value("0x1p-1200"), Some(0.0));
         assert_eq!(value("0x0p99999999"), Some(0.0));
         assert!(is_illegal("0x1p1024"));
         assert!(is_illegal("0x1p99999999"));

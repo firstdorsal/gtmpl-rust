@@ -485,7 +485,7 @@ mod tests {
         let result = math_add(&[Value::Number(3.into()), Value::Number(5.into())]).unwrap();
         match result {
             Value::Number(n) => {
-                assert_eq!(to_i64(&Value::Number(n.clone())).ok(), Some(8));
+                assert_eq!(to_i64(&Value::Number(n)).ok(), Some(8));
             }
             _ => panic!("expected Number, got {:?}", result),
         }

@@ -22,12 +22,21 @@ fn context(fields: usize) -> Context {
     Context::from(root)
 }
 
-/// The same lookup written three ways. All three have to stay independent of how
-/// large the maps they walk through are, so none of them may clone an intermediate.
-const SOURCES: [(&str, &str); 3] = [
+/// The same lookup written four ways.
+///
+/// `dot` and `dollar` read the context in place and have to stay independent of how
+/// large it is. `variable` is known *not* to be: binding `.` to a variable clones the
+/// whole context, which is the declaration rather than the chain, and the 10/100/1000
+/// spread is what that costs. `floats` covers the number formatter, which runs once
+/// per rendered value.
+const SOURCES: [(&str, &str); 4] = [
     ("dot", "{{.kind}}-{{.metadata.name}}"),
     ("dollar", "{{$.kind}}-{{$.metadata.name}}"),
     ("variable", "{{$d := .}}{{$d.kind}}-{{$d.metadata.name}}"),
+    (
+        "floats",
+        r#"{{printf "%v %.3f %e %g" 1e20 3.14159 1234.5678 0.0001}}"#,
+    ),
 ];
 
 fn render_fields(c: &mut Criterion) {

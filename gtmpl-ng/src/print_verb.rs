@@ -17,6 +17,10 @@ use gtmpl_value_ng::{format_float, FloatFormat, NumberKind, Value};
 
 /// Formats one argument for one verb.
 pub fn print(p: &FormatParams, verb: char, val: &Value) -> String {
+    // Go's `%T` names the type whatever the value is, and pads it like a string.
+    if verb == 'T' {
+        return pad_string(p, type_name(val).unwrap_or("<nil>"));
+    }
     match *val {
         Value::Number(ref n) => match n.kind() {
             NumberKind::Unsigned(u) => integer(p, verb, i128::from(u), val),
@@ -41,20 +45,20 @@ pub fn print(p: &FormatParams, verb: char, val: &Value) -> String {
             _ => bad_verb(p, verb, val),
         },
         Value::String(ref s) => match verb {
-            's' | 'v' => pad_text(p, s),
+            's' | 'v' => pad_string(p, s),
+            // For `%x` Go's precision counts bytes to encode, not characters of the
+            // result, and the quotes `%q` adds are never counted either -- both
+            // truncate the string first and pad afterwards.
             'x' => pad_text(p, &hex_bytes(p, s, false)),
             'X' => pad_text(p, &hex_bytes(p, s, true)),
-            'q' => pad_text(p, &quote_string(p, s)),
+            'q' => pad_text(p, &quote_string(p, truncate(p, s))),
             _ => bad_verb(p, verb, val),
         },
         // Go applies the verb to each element rather than to the container, so a verb
         // that does not fit marks the offending element: `[1 %!d(string=a)]`.
         Value::Array(ref items) => {
-            let rendered: Vec<String> = items
-                .iter()
-                .map(|item| print(&FormatParams::default(), verb, item))
-                .collect();
-            pad_text(p, &format!("[{}]", rendered.join(" ")))
+            let rendered: Vec<String> = items.iter().map(|item| print(p, verb, item)).collect();
+            format!("[{}]", rendered.join(" "))
         }
         Value::Map(ref entries) | Value::Object(ref entries) => {
             // Go has sorted map keys since 1.12, so the same data prints the same way
@@ -64,15 +68,14 @@ pub fn print(p: &FormatParams, verb: char, val: &Value) -> String {
             let rendered: Vec<String> = keys
                 .into_iter()
                 .map(|key| {
-                    let plain = FormatParams::default();
                     format!(
                         "{}:{}",
-                        print(&plain, verb, &Value::String(key.clone())),
-                        print(&plain, verb, &entries[key])
+                        print(p, verb, &Value::String(key.clone())),
+                        print(p, verb, &entries[key])
                     )
                 })
                 .collect();
-            pad_text(p, &format!("map[{}]", rendered.join(" ")))
+            format!("map[{}]", rendered.join(" "))
         }
         Value::Function(_) => match verb {
             'v' => pad_text(p, &val.to_string()),
@@ -117,19 +120,20 @@ pub fn type_name(val: &Value) -> Option<&'static str> {
 /// signed and unsigned cases share one implementation.
 fn integer(p: &FormatParams, verb: char, value: i128, val: &Value) -> String {
     let magnitude = value.unsigned_abs();
-    let (digits, prefix) = match verb {
+    let (digits, radix_prefix) = match verb {
         'd' | 'v' => (format!("{}", magnitude), ""),
         'b' => (format!("{:b}", magnitude), if p.sharp { "0b" } else { "" }),
-        // Go's `#` for octal is a bare leading zero, not Rust's `0o`.
-        'o' => (format!("{:o}", magnitude), if p.sharp { "0" } else { "" }),
-        'O' => (format!("{:o}", magnitude), "0o"),
+        // Octal is the exception: Go's `#` is a bare leading zero rather than a
+        // prefix, so it joins the digits below -- after the zero padding, which is why
+        // `%#08o` is eight characters and `%#08x` is ten.
+        'o' | 'O' => (format!("{:o}", magnitude), ""),
         'x' => (format!("{:x}", magnitude), if p.sharp { "0x" } else { "" }),
         'X' => (format!("{:X}", magnitude), if p.sharp { "0X" } else { "" }),
         'c' => return pad_text(p, &code_point(value).to_string()),
         'q' => return pad_text(p, &quote_rune(code_point(value), p.plus)),
         // Go reads the value as an unsigned 64-bit code point here, so a negative
         // number shows as its two's complement: `%U` of -5 is U+FFFFFFFFFFFFFFFB.
-        'U' => return pad_text(p, &code_point_notation(p, value)),
+        'U' => return code_point_notation(p, value),
         'f' | 'F' => return float(p, value as f64, FloatFormat::Fixed),
         'e' => return float(p, value as f64, FloatFormat::Exponent),
         'E' => return float(p, value as f64, FloatFormat::ExponentUpper),
@@ -137,6 +141,13 @@ fn integer(p: &FormatParams, verb: char, value: i128, val: &Value) -> String {
         'G' => return float(p, value as f64, FloatFormat::GeneralUpper),
         _ => return bad_verb(p, verb, val),
     };
+
+    // A precision of zero on a value of zero asks for no digits at all, so Go writes
+    // the padding and nothing else -- not even a sign or a prefix.
+    if p.precision == Some(0) && value == 0 {
+        let without_zero_fill = FormatParams { zero: false, ..*p };
+        return pad_with(&without_zero_fill, "", ' ');
+    }
 
     let sign = if value < 0 {
         "-"
@@ -159,15 +170,23 @@ fn integer(p: &FormatParams, verb: char, value: i128, val: &Value) -> String {
     };
     let zeros = minimum_digits.saturating_sub(digits.len());
 
-    let mut text = String::with_capacity(sign.len() + prefix.len() + zeros + digits.len());
-    text.push_str(sign);
-    text.push_str(prefix);
+    let mut body = String::with_capacity(radix_prefix.len() + zeros + digits.len() + 3);
     for _ in 0..zeros {
-        text.push('0');
+        body.push('0');
     }
-    text.push_str(&digits);
+    body.push_str(&digits);
+    // Go checks the leading digit after the padding, so `%#08o` of 8 needs no extra
+    // zero while `%#o` of 8 does -- and `%#o` of 0 stays a single `0`.
+    if matches!(verb, 'o' | 'O') && p.sharp && !body.starts_with('0') {
+        body.insert(0, '0');
+    }
+    if verb == 'O' {
+        body.insert_str(0, "0o");
+    }
+    body.insert_str(0, radix_prefix);
+    body.insert_str(0, sign);
     // The zeros are already in place, so whatever width is left takes spaces.
-    pad_with(p, &text, ' ')
+    pad_with(p, &body, ' ')
 }
 
 /// Formats a float through Go's rules, then applies the flags and width. Unlike an
@@ -206,15 +225,28 @@ fn float(p: &FormatParams, value: f64, format: FloatFormat) -> String {
 
 /// Pads a run of text to the width. Go pads text with the zero flag's character, so
 /// `%05v` of `true` is `0true`.
+///
+/// A precision is *not* applied: Go truncates strings only, and reaches a boolean, a
+/// character and a nil without passing through `truncateString` -- `%.2v` of `true` is
+/// `true` there, not `tr`.
 fn pad_text(p: &FormatParams, text: &str) -> String {
-    let text = match p.precision {
-        // For text a precision is a maximum length, counted in characters.
-        Some(precision) if text.chars().count() > precision => {
-            text.chars().take(precision).collect()
-        }
-        _ => text.to_owned(),
-    };
-    pad_with(p, &text, if p.zero { '0' } else { ' ' })
+    pad_with(p, text, if p.zero { '0' } else { ' ' })
+}
+
+/// `pad_text` for a string, where Go's precision is a maximum length in characters.
+fn pad_string(p: &FormatParams, text: &str) -> String {
+    pad_text(p, truncate(p, text))
+}
+
+/// A string cut to the precision, if one was given.
+fn truncate<'a>(p: &FormatParams, text: &'a str) -> &'a str {
+    match p.precision {
+        Some(precision) => match text.char_indices().nth(precision) {
+            Some((at, _)) => &text[..at],
+            None => text,
+        },
+        None => text,
+    }
 }
 
 /// Go's `fmt.pad`: left unless the `-` flag asked for right.
@@ -233,15 +265,26 @@ fn pad_with(p: &FormatParams, text: &str, fill: char) -> String {
 
 /// `%U`: `U+` and at least four upper-case hex digits, with the character itself
 /// appended when the `#` flag is given.
+///
+/// The precision raises that minimum rather than truncating, and the zero flag does
+/// not apply -- Go pads this one with spaces whatever the flags say.
 fn code_point_notation(p: &FormatParams, value: i128) -> String {
     let scalar = value as i64 as u64;
-    let mut out = format!("U+{:04X}", scalar);
+    let digits = p.precision.unwrap_or(4).max(4);
+    let mut out = format!("U+{:01$X}", scalar, digits);
     if p.sharp {
         if let Some(c) = u32::try_from(scalar).ok().and_then(char::from_u32) {
-            let _ = write!(out, " {}", quote_rune(c, false));
+            if is_printable(c) {
+                let _ = write!(out, " {}", quote_rune(c, false));
+            }
         }
     }
-    out
+    let without_zero_fill = FormatParams {
+        zero: false,
+        precision: None,
+        ..*p
+    };
+    pad_text(&without_zero_fill, &out)
 }
 
 /// An invalid code point becomes the replacement character, as it does in Go.
@@ -253,12 +296,35 @@ fn code_point(value: i128) -> char {
 }
 
 /// `%x`/`%X` on a string: the hex of its bytes, with the `#` flag's prefix.
+///
+/// Go's precision limits how many *bytes* are encoded, so `%.2x` of `"abcdef"` is the
+/// hex of `ab`; the space flag separates each byte, and with `#` prefixes each one.
+/// Nothing to encode writes nothing, prefix included.
 fn hex_bytes(p: &FormatParams, s: &str, upper: bool) -> String {
-    let mut out = String::with_capacity(s.len() * 2 + 2);
-    if p.sharp {
-        out.push_str(if upper { "0X" } else { "0x" });
+    let bytes = match p.precision {
+        Some(precision) => &s.as_bytes()[..precision.min(s.len())],
+        None => s.as_bytes(),
+    };
+    if bytes.is_empty() {
+        return String::new();
     }
-    for byte in s.as_bytes() {
+    let prefix = if p.sharp {
+        if upper {
+            "0X"
+        } else {
+            "0x"
+        }
+    } else {
+        ""
+    };
+    let mut out = String::with_capacity(bytes.len() * 5 + 2);
+    for (index, byte) in bytes.iter().enumerate() {
+        if p.space && index > 0 {
+            out.push(' ');
+        }
+        if index == 0 || p.space {
+            out.push_str(prefix);
+        }
         let _ = if upper {
             write!(out, "{:02X}", byte)
         } else {
@@ -325,10 +391,22 @@ fn escape_into(out: &mut String, c: char, quote: char, ascii_only: bool) {
         c if (c as u32) < 0x20 || c as u32 == 0x7f => {
             let _ = write!(out, "\\x{:02x}", c as u32);
         }
-        c if c.is_control() => escape_unicode(out, c),
+        c if !is_printable(c) => escape_unicode(out, c),
         c if ascii_only && !c.is_ascii() => escape_unicode(out, c),
         c => out.push(c),
     }
+}
+
+/// Approximates Go's `strconv.IsPrint`, which a `%q` has to apply so the result is
+/// a literal that can be read back.
+///
+/// Rust's standard library exposes no general-category table, so this covers what it
+/// can see: a control character, and any whitespace other than a plain space -- which
+/// is where the no-break space and the line and paragraph separators live. The
+/// invisible format characters (a zero-width space, a byte-order mark, a bidi
+/// override) are not reachable from `std` and still come through raw.
+fn is_printable(c: char) -> bool {
+    !c.is_control() && !(c.is_whitespace() && c != ' ')
 }
 
 fn escape_unicode(out: &mut String, c: char) {

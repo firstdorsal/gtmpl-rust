@@ -2,7 +2,7 @@ use std::cmp::{Ordering, PartialOrd};
 use std::fmt;
 
 /// Internal number format for `gtmpl_value_ng`.
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Number {
     n: Num,
 }
@@ -40,6 +40,10 @@ enum Num {
 
 /// `PartialOrd` for `Number`.
 ///
+/// Exact across all three representations: a `u64` past the `f64` mantissa is not
+/// widened to compare it, and a float is split into its integral and fractional parts
+/// rather than the integer being pushed through `as f64`.
+///
 /// # Examples
 ///
 /// ```rust
@@ -49,24 +53,42 @@ enum Num {
 /// let f: Number = 23.42.into();
 ///
 /// assert!(i < f);
+///
+/// // `u64::MAX` is 18446744073709551615 and the nearest float above it is 2^64,
+/// // 18446744073709551616. Widening the integer to compare them makes the two look
+/// // equal; splitting the float does not.
+/// assert!(Number::unsigned(u64::MAX) < Number::float(1.8446744073709552e19));
 /// ```
 impl PartialOrd for Num {
     fn partial_cmp(&self, other: &Num) -> Option<Ordering> {
         match (*self, *other) {
-            (Num::U(s), Num::U(o)) => s.partial_cmp(&o),
-            (Num::I(s), Num::I(o)) => s.partial_cmp(&o),
+            (Num::U(s), Num::U(o)) => Some(s.cmp(&o)),
+            (Num::I(s), Num::I(o)) => Some(s.cmp(&o)),
             (Num::F(s), Num::F(o)) => s.partial_cmp(&o),
-            (Num::I(_), Num::U(_)) => Some(Ordering::Less),
-            (Num::U(_), Num::I(_)) => Some(Ordering::Greater),
-            (Num::F(s), Num::I(o)) => s.partial_cmp(&(o as f64)),
-            (Num::I(s), Num::F(o)) => (s as f64).partial_cmp(&o),
-            (Num::F(s), Num::U(o)) => s.partial_cmp(&(o as f64)),
-            (Num::U(s), Num::F(o)) => (s as f64).partial_cmp(&o),
+            // A signed value is below an unsigned one only once it is negative.
+            // `Number::signed` can hold a non-negative value, so this has to look
+            // rather than assume.
+            (Num::I(s), Num::U(o)) => Some(if s < 0 {
+                Ordering::Less
+            } else {
+                (s as u64).cmp(&o)
+            }),
+            (Num::U(s), Num::I(o)) => Some(if o < 0 {
+                Ordering::Greater
+            } else {
+                s.cmp(&(o as u64))
+            }),
+            (Num::F(s), Num::I(o)) => compare_float_to_signed(s, o),
+            (Num::I(s), Num::F(o)) => compare_float_to_signed(o, s).map(Ordering::reverse),
+            (Num::F(s), Num::U(o)) => compare_float_to_unsigned(s, o),
+            (Num::U(s), Num::F(o)) => compare_float_to_unsigned(o, s).map(Ordering::reverse),
         }
     }
 }
 
-/// `PartialEq` for `Number`.
+/// `PartialEq` for `Number`, defined through the ordering so the two can never
+/// disagree -- `ge` answering `true` where `eq` answered `false` for the same pair was
+/// exactly the bug that defining them separately produced.
 ///
 /// # Examples
 ///
@@ -77,22 +99,77 @@ impl PartialOrd for Num {
 /// let f: Number = 23.0.into();
 ///
 /// assert!(i == f);
+/// // Across representations too, which a whole float only reaches through
+/// // `Number::float` or a deserializer.
+/// assert_eq!(Number::float(3.0), Number::unsigned(3));
+/// assert_eq!(Number::signed(3), Number::unsigned(3));
 /// ```
 impl PartialEq for Num {
     fn eq(&self, other: &Num) -> bool {
-        match (*self, *other) {
-            (Num::U(s), Num::U(o)) => s.eq(&o),
-            (Num::I(s), Num::I(o)) => s.eq(&o),
-            (Num::F(s), Num::F(o)) => s.eq(&o),
-            _ => false,
-        }
+        self.partial_cmp(other) == Some(Ordering::Equal)
     }
+}
+
+/// Compares a float against a signed integer without widening either.
+///
+/// `trunc` is exact, and so is the cast once the value is known to be in range, so the
+/// integral parts compare as integers and the fraction only breaks a tie.
+fn compare_float_to_signed(value: f64, integer: i64) -> Option<Ordering> {
+    if value.is_nan() {
+        return None;
+    }
+    // 2^63 and -2^63 are the first values outside an i64, both exactly representable.
+    if value >= 9_223_372_036_854_775_808.0 {
+        return Some(Ordering::Greater);
+    }
+    if value < -9_223_372_036_854_775_808.0 {
+        return Some(Ordering::Less);
+    }
+    let truncated = value.trunc();
+    Some((truncated as i64).cmp(&integer).then_with(|| {
+        // `trunc` rounds toward zero, so the remainder carries the value's sign.
+        let fraction = value - truncated;
+        if fraction > 0.0 {
+            Ordering::Greater
+        } else if fraction < 0.0 {
+            Ordering::Less
+        } else {
+            Ordering::Equal
+        }
+    }))
+}
+
+/// Compares a float against an unsigned integer without widening either.
+fn compare_float_to_unsigned(value: f64, integer: u64) -> Option<Ordering> {
+    if value.is_nan() {
+        return None;
+    }
+    if value < 0.0 {
+        return Some(Ordering::Less);
+    }
+    // 2^64 is the first value outside a u64, exactly representable.
+    if value >= 18_446_744_073_709_551_616.0 {
+        return Some(Ordering::Greater);
+    }
+    let truncated = value.trunc();
+    Some((truncated as u64).cmp(&integer).then_with(|| {
+        let fraction = value - truncated;
+        if fraction > 0.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    }))
 }
 
 /// Which of the three representations a [`Number`] holds.
 ///
 /// Reading a number through `as_u64`/`as_i64`/`as_f64` means trying them in the right
 /// order and handling a "none of them" case that cannot happen; this says it once.
+///
+/// Deliberately exhaustive: `#[non_exhaustive]` would force back the fallback arm
+/// this type exists to remove, so a fourth representation would be a breaking change
+/// and is meant to be.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NumberKind {
     Unsigned(u64),
@@ -235,11 +312,9 @@ impl fmt::Display for Number {
         match self.n {
             Num::U(n) => write!(f, "{}", n),
             Num::I(n) => write!(f, "{}", n),
-            Num::F(n) => f.write_str(&crate::go_fmt::format_float(
-                n,
-                crate::go_fmt::FloatFormat::General,
-                None,
-            )),
+            Num::F(n) => {
+                crate::go_fmt::write_float(f, n, crate::go_fmt::FloatFormat::General, None)
+            }
         }
     }
 }
@@ -378,6 +453,107 @@ mod test {
         assert_eq!(num.as_i64(), None);
         assert_eq!(num.as_u64(), None);
         assert_eq!(num.as_f64(), Some(-23.42f64));
+    }
+
+    /// The three constructors can build states the `From` impls never produced --
+    /// a non-negative `Signed`, and a whole `Float` -- and the comparison arms used to
+    /// take a shortcut that assumed they could not exist. `ge` then answered `true`
+    /// where `eq` answered `false` for the same pair.
+    #[test]
+    fn comparison_is_exact_across_representations() {
+        assert_eq!(Number::signed(5), Number::unsigned(5));
+        assert_eq!(Number::float(3.0), Number::unsigned(3));
+        assert_eq!(Number::float(-3.0), Number::signed(-3));
+        assert!(Number::signed(5) > Number::unsigned(3));
+        assert!(Number::signed(-5) < Number::unsigned(0));
+        assert!(Number::float(3.5) > Number::unsigned(3));
+        assert!(Number::float(3.5) < Number::unsigned(4));
+        assert!(Number::float(-3.5) < Number::signed(-3));
+        assert!(Number::float(-3.5) > Number::signed(-4));
+    }
+
+    /// Widening either side to `f64` to compare them loses the distinction once the
+    /// integer is past the mantissa, so neither side is widened.
+    #[test]
+    fn comparison_does_not_widen_past_the_mantissa() {
+        // 2^64, the first float above u64::MAX.
+        let just_above = Number::float(18_446_744_073_709_551_616.0);
+        assert!(Number::unsigned(u64::MAX) < just_above);
+        assert_ne!(Number::unsigned(u64::MAX), just_above);
+        // Two integers one apart, both of which widen to the same f64.
+        assert!(Number::unsigned(u64::MAX - 1) < Number::unsigned(u64::MAX));
+        // -9223372036854775807.0 is not representable and rounds to exactly i64::MIN,
+        // so the comparison needs the next float that really is above it.
+        assert_eq!(
+            Number::signed(i64::MIN),
+            Number::float(-9_223_372_036_854_775_808.0)
+        );
+        assert!(Number::signed(i64::MIN) < Number::float(-9_223_372_036_854_774_784.0));
+    }
+
+    #[test]
+    fn a_nan_compares_to_nothing() {
+        let nan = Number::float(f64::NAN);
+        assert_eq!(nan.partial_cmp(&Number::unsigned(1)), None);
+        assert_eq!(Number::unsigned(1).partial_cmp(&nan), None);
+        assert_ne!(nan, Number::float(f64::NAN));
+    }
+
+    /// A whole float is stored as an integer so `{{ 3.0 }}` renders `3` as it does in
+    /// Go. That only holds while the value fits an integer: an `as` cast saturates,
+    /// so this used to replace the number with a different one.
+    #[test]
+    fn a_float_past_the_integers_stays_a_float() {
+        assert_eq!(Number::from(1e20).kind(), NumberKind::Float(1e20));
+        assert_eq!(Number::from(1e20).as_u64(), None);
+        assert_eq!(Number::from(-1e20).kind(), NumberKind::Float(-1e20));
+        assert_eq!(Number::from(-1e20).as_i64(), None);
+        assert_eq!(Number::from(1e300).kind(), NumberKind::Float(1e300));
+
+        // The boundaries the collapse branches on: 2^64 is the first float outside a
+        // u64, and -2^63 is the last one inside an i64.
+        assert_eq!(
+            Number::from(18_446_744_073_709_551_616.0).kind(),
+            NumberKind::Float(18_446_744_073_709_551_616.0)
+        );
+        assert_eq!(
+            Number::from(-9_223_372_036_854_775_808.0).kind(),
+            NumberKind::Signed(i64::MIN)
+        );
+    }
+
+    /// "Whole" used to be tested as `fract() < EPSILON`, which every magnitude below
+    /// about 2e-16 satisfies, so a tiny float collapsed to zero.
+    #[test]
+    fn a_tiny_float_is_not_collapsed_to_zero() {
+        assert_eq!(Number::from(1e-20).kind(), NumberKind::Float(1e-20));
+        assert_eq!(Number::from(1e-20).as_f64(), Some(1e-20));
+        assert_eq!(
+            Number::from(f64::MIN_POSITIVE).as_f64(),
+            Some(f64::MIN_POSITIVE)
+        );
+        assert_eq!(Number::from(5e-324f64).as_f64(), Some(5e-324));
+    }
+
+    /// Negative zero is whole, but as an integer it loses its sign and renders `0`
+    /// where Go renders `-0`.
+    #[test]
+    fn negative_zero_stays_a_float() {
+        match Number::from(-0.0).kind() {
+            NumberKind::Float(f) => assert!(f.is_sign_negative() && f == 0.0),
+            other => panic!("expected a float, got {:?}", other),
+        }
+        assert_eq!(Number::from(-0.0).to_string(), "-0");
+        assert_eq!(Number::from(0.0).kind(), NumberKind::Unsigned(0));
+    }
+
+    /// A whole float still reads as an integer, which is what makes `{{ 3.0 }}`
+    /// render `3`.
+    #[test]
+    fn a_whole_float_in_range_still_collapses() {
+        assert_eq!(Number::from(3.0).kind(), NumberKind::Unsigned(3));
+        assert_eq!(Number::from(-3.0).kind(), NumberKind::Signed(-3));
+        assert_eq!(Number::from(1e3).kind(), NumberKind::Unsigned(1000));
     }
 
     #[test]

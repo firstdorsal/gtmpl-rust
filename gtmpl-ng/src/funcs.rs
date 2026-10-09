@@ -1,6 +1,5 @@
 //! Builtin functions.
 use std::cmp::Ordering;
-use std::fmt::Write;
 
 use gtmpl_value_ng::{Func, FuncError, Value};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
@@ -226,7 +225,7 @@ pub fn len(args: &[Value]) -> Result<Value, FuncError> {
 /// # Example
 /// ```
 /// use gtmpl_ng::{gtmpl_fn, template, Value};
-/// use gtmpl_value_ng::{FuncError, Function};
+/// use gtmpl_ng::{FuncError, Function};
 ///
 /// gtmpl_fn!(
 /// fn add(a: u64, b: u64) -> Result<u64, FuncError> {
@@ -305,18 +304,13 @@ pub fn println(args: &[Value]) -> Result<Value, FuncError> {
         Some(first_elt) => {
             let (lower, _) = iter.size_hint();
             let mut result = String::with_capacity(lower + 1);
-            if let Value::String(ref v) = *first_elt {
-                result.push_str(v);
-            } else {
-                write!(&mut result, "{}", first_elt).unwrap();
-            }
+            // `printed` rather than `Display`, so an absent value reads `<nil>` the
+            // way `fmt` writes it -- `print` has done that since 0.8.0 and this was
+            // left behind, which is the inconsistency `printed` exists to remove.
+            result.push_str(&printed(first_elt));
             for elt in iter {
                 result.push(' ');
-                if let Value::String(ref v) = *elt {
-                    result.push_str(v);
-                } else {
-                    write!(&mut result, "{}", elt).unwrap();
-                }
+                result.push_str(&printed(elt));
             }
             result.push('\n');
             result
@@ -533,40 +527,16 @@ ge(a: ref Value, b: ref Value) -> Result<Value, FuncError> {
 
 fn cmp(left: &Value, right: &Value) -> Option<Ordering> {
     match (left, right) {
-        (Value::Number(l), Value::Number(r)) => {
-            // Exact integer comparison when both sides fit in i64.
-            if let (Some(li), Some(ri)) = (l.as_i64(), r.as_i64()) {
-                return li.partial_cmp(&ri);
-            }
-            // Exact unsigned comparison for values outside the i64 range.
-            if let (Some(lu), Some(ru)) = (l.as_u64(), r.as_u64()) {
-                return lu.partial_cmp(&ru);
-            }
-            // Mixed int/float or disjoint signed/unsigned ranges: coerce
-            // both sides to f64. This is lossy for integers beyond the
-            // f64 mantissa, but matches Go's numeric-comparison semantics
-            // and — crucially — never returns `None` for an otherwise
-            // comparable pair of numbers. Previously, the function checked
-            // `as_f64` first and short-circuited `None` for any value that
-            // happened to be stored as an integer variant, so e.g.
-            // `lt 5 3.5` reported "unable to compare".
-            let lf = number_to_f64(l)?;
-            let rf = number_to_f64(r)?;
-            lf.partial_cmp(&rf)
-        }
+        // `Number`'s own ordering is exact across all three representations, so
+        // there is nothing left to do here. It used to widen a mixed pair to `f64`,
+        // which is lossy past the mantissa, and before that it answered `None` for
+        // any pair stored as integers -- `lt 5 3.5` reported "unable to compare".
+        (Value::Number(l), Value::Number(r)) => l.partial_cmp(r),
         (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
         (Value::String(l), Value::String(r)) => l.partial_cmp(r),
         (Value::Array(l), Value::Array(r)) => l.len().partial_cmp(&r.len()),
         _ => None,
     }
-}
-
-/// Convert any `Number` variant to `f64`, accepting `Num::F`, `Num::I`,
-/// and `Num::U`. Returns `None` only if the library adds a new variant.
-fn number_to_f64(n: &gtmpl_value_ng::Number) -> Option<f64> {
-    n.as_f64()
-        .or_else(|| n.as_i64().map(|i| i as f64))
-        .or_else(|| n.as_u64().map(|u| u as f64))
 }
 
 #[cfg(test)]

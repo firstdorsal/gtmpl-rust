@@ -187,6 +187,27 @@ mod tests {
         }
     }
 
+    /// `serde_yaml` read a leading-zero integer as a string; `serde_yaml_neo` reads it
+    /// as octal, which is what Go's YAML readers and Helm do -- so a file mode comes
+    /// through as the number it means. Expectations from `gopkg.in/yaml.v3`.
+    #[test]
+    fn from_yaml_reads_a_leading_zero_integer_as_octal() {
+        for (document, expected) in [
+            ("mode: 0644", "420"),
+            ("mode: 00123", "83"),
+            ("mode: 0o644", "420"),
+            ("mode: 0x1f", "31"),
+            ("mode: 123", "123"),
+        ] {
+            let parsed = from_yaml(&[Value::from(document)]).unwrap();
+            let mode = match parsed {
+                Value::Object(ref fields) => fields.get("mode").cloned().unwrap(),
+                ref other => panic!("expected an object, got {:?}", other),
+            };
+            assert_eq!(mode.to_string(), expected, "fromYaml of {:?}", document);
+        }
+    }
+
     #[test]
     fn to_json_writes_integers_as_integers() {
         for (value, expected) in [

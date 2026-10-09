@@ -151,7 +151,10 @@ pub fn serde_yaml_value_to_gtmpl_value(value: serde_yaml_neo::Value) -> Value {
             } else if let Some(f) = n.as_f64() {
                 Value::Number(f.into())
             } else {
-                Value::Nil
+                // A `serde_yaml_neo::Number` is always one of the three, so reaching
+                // here means the dependency changed shape. Keeping the text loses the
+                // type; turning it into a null would lose the value.
+                Value::String(n.to_string())
             }
         }
         serde_yaml_neo::Value::String(s) => Value::String(s),

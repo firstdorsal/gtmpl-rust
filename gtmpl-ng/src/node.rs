@@ -194,7 +194,7 @@ impl Nodes {
     ///
     /// For most nodes that is `pos() + len()`. A branch is the exception: its length
     /// is only its pipeline's span, while its text runs through its `{{end}}`.
-    pub fn extent(&self) -> Pos {
+    pub(crate) fn extent(&self) -> Pos {
         match *self {
             Nodes::If(ref n) | Nodes::Range(ref n) | Nodes::With(ref n) => n.body_end,
             _ => self.pos() + self.len(),
@@ -847,8 +847,9 @@ impl NumberNode {
                     IntegerLiteral::NotInteger => {}
                 }
 
-                // An integer reading is promoted to a float as well, as Go does, so a
-                // later whole-float check has something to compare against.
+                // A float reading only applies when no integer reading did. `Value::from`
+                // then decides whether the float collapses back to an integer, which is
+                // what makes `{{ 1e3 }}` render `1000`.
                 let as_f64 = if is_i64 || is_u64 {
                     if is_i64 {
                         as_i64 as f64

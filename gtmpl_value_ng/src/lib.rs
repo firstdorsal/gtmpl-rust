@@ -48,7 +48,7 @@ mod value;
 #[cfg(feature = "gtmpl_value_compat")]
 pub use crate::compat::FromLegacyValueError;
 pub use crate::from::*;
-pub use crate::go_fmt::{format_float, FloatFormat};
+pub use crate::go_fmt::{format_float, write_float, FloatFormat};
 pub use crate::value::*;
 
 #[cfg(test)]

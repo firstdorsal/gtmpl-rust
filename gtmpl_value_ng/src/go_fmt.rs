@@ -8,7 +8,15 @@
 //! This module implements Go's rules so that a `Value` renders the same whether it
 //! goes through `Display` or through the engine's `printf`.
 
-use std::fmt::Write;
+use std::fmt::{self, Write};
+
+/// How many decimal digits an `f64` can actually carry. Its exact expansion never
+/// runs past this -- the smallest subnormal, 2^-1074, is the longest at 1074 places
+/// after the point -- so a precision beyond it is asking only for zeros.
+///
+/// It also keeps Rust's formatter in range: it refuses a precision above `u16::MAX`,
+/// where Go goes on to a million.
+const EXACT_DIGITS: usize = 1100;
 
 /// Which of Go's float formats to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +50,36 @@ pub enum FloatFormat {
 /// assert_eq!(format_float(f64::INFINITY, FloatFormat::General, None), "+Inf");
 /// ```
 pub fn format_float(value: f64, format: FloatFormat, precision: Option<usize>) -> String {
+    let mut out = String::new();
+    // Writing into a `String` cannot fail.
+    let _ = write_float(&mut out, value, format, precision);
+    out
+}
+
+/// Writes a float the way Go's `strconv.FormatFloat` does.
+///
+/// This is the form a `Display` implementation wants; [`format_float`] is the same
+/// thing into a fresh `String`, for a caller with nothing to write into.
+///
+/// # Examples
+///
+/// ```rust
+/// use gtmpl_value_ng::{write_float, FloatFormat};
+///
+/// let mut out = String::new();
+/// write_float(&mut out, 1e20, FloatFormat::General, None).unwrap();
+/// assert_eq!(out, "1e+20");
+/// ```
+pub fn write_float<W: fmt::Write>(
+    out: &mut W,
+    value: f64,
+    format: FloatFormat,
+    precision: Option<usize>,
+) -> fmt::Result {
+    out.write_str(&render(value, format, precision))
+}
+
+fn render(value: f64, format: FloatFormat, precision: Option<usize>) -> String {
     if value.is_nan() {
         return "NaN".to_owned();
     }
@@ -59,10 +97,24 @@ pub fn format_float(value: f64, format: FloatFormat, precision: Option<usize>) -
     let body = match format {
         // Rust's fixed formatting already matches Go's: both round the binary value
         // correctly and then write every digit.
-        FloatFormat::Fixed => format!("{:.*}", precision.unwrap_or(6), magnitude),
+        FloatFormat::Fixed => {
+            let places = precision.unwrap_or(6);
+            if places <= EXACT_DIGITS {
+                format!("{:.*}", places, magnitude)
+            } else {
+                let mut out = format!("{:.*}", EXACT_DIGITS, magnitude);
+                out.extend(std::iter::repeat_n('0', places - EXACT_DIGITS));
+                out
+            }
+        }
         FloatFormat::Exponent | FloatFormat::ExponentUpper => {
             let digits_after_point = precision.unwrap_or(6);
-            let (digits, exponent) = decimal_digits(magnitude, Some(digits_after_point + 1), false);
+            // One more digit than there are places after the point, and never more
+            // than the float actually has: `render_exponent` fills the rest with the
+            // zeros they would be anyway. Saturating so a caller's precision cannot
+            // overflow into a tiny one.
+            let significant = digits_after_point.saturating_add(1).min(EXACT_DIGITS);
+            let (digits, exponent) = decimal_digits(magnitude, Some(significant), false);
             render_exponent(
                 &digits,
                 exponent,
@@ -149,7 +201,10 @@ fn render_general(
     let threshold = match precision {
         None => 6,
         Some(precision) => {
-            let precision = precision.max(1) as i32;
+            // No float has more than 17 significant digits, so a precision too large
+            // for an `i32` cannot change the outcome -- but truncating into one
+            // silently could.
+            let precision = i32::try_from(precision.max(1)).unwrap_or(i32::MAX);
             if precision > digit_count && digit_count >= point_position {
                 digit_count
             } else {

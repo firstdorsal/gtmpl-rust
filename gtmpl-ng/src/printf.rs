@@ -14,6 +14,11 @@ pub struct FormatParams {
     pub precision: Option<usize>,
 }
 
+/// Go's `fmt.tooLarge`: a width or precision past this is a typo rather than an
+/// intent, and Go refuses it instead of allocating for it. Without the cap, a format
+/// string could ask for a `String` of `usize::MAX` and take the process down.
+const TOO_LARGE: usize = 1_000_000;
+
 /// Formats `args` into `format` the way Go's `fmt.Sprintf` does.
 ///
 /// Go's formatter never fails. A verb that does not apply to its argument, a missing
@@ -68,14 +73,16 @@ pub fn sprintf(format: &str, args: &[Value]) -> String {
         if at < chars.len() && chars[at] == '*' {
             at += 1;
             match take_int(args, &mut arg_index) {
-                Some(width) => {
+                // Go's `tooLarge` refuses a magnitude past a million in either
+                // direction, a negative width otherwise meaning "align left".
+                Some(width) if width.unsigned_abs() <= TOO_LARGE as u64 => {
                     if width < 0 {
                         params.minus = true;
                         params.zero = false;
                     }
                     params.width = width.unsigned_abs() as usize;
                 }
-                None => out.push_str("%!(BADWIDTH)"),
+                _ => out.push_str("%!(BADWIDTH)"),
             }
             after_index = false;
         } else if let Some(width) = read_number(&chars, &mut at) {
@@ -103,8 +110,12 @@ pub fn sprintf(format: &str, args: &[Value]) -> String {
             if at < chars.len() && chars[at] == '*' {
                 at += 1;
                 match take_int(args, &mut arg_index) {
-                    Some(precision) => params.precision = Some(precision.max(0) as usize),
-                    None => out.push_str("%!(BADPREC)"),
+                    // A negative precision is not "no decimals" to Go, it is no
+                    // precision at all: reported, and then ignored.
+                    Some(precision) if (0..=TOO_LARGE as i64).contains(&precision) => {
+                        params.precision = Some(precision as usize)
+                    }
+                    _ => out.push_str("%!(BADPREC)"),
                 }
                 after_index = false;
             } else {
@@ -139,6 +150,13 @@ pub fn sprintf(format: &str, args: &[Value]) -> String {
         } else if arg_index >= args.len() {
             out.push_str(&format!("%!{}(MISSING)", verb));
         } else {
+            // Go moves `+` and `#` into its field-name and Go-syntax modes for `v`
+            // and clears both, so neither reaches a number's sign: `%+v` of 42 is
+            // `42`, not `+42`.
+            if verb == 'v' {
+                params.plus = false;
+                params.sharp = false;
+            }
             out.push_str(&print(&params, verb, &args[arg_index]));
             arg_index += 1;
         }
@@ -199,25 +217,39 @@ fn read_index(
             *arg_index = index - 1;
             true
         }
+        // Go reports "consumed" whenever the bracket itself parsed, even when the
+        // index named an argument that is not there -- so `%[0][1]d` stops at the
+        // first bracket and `[` becomes the verb.
         _ => {
             *good_index = false;
-            false
+            parsed.is_ok()
         }
     }
 }
 
-/// Reads a run of decimal digits, if any.
+/// Reads a run of decimal digits, if any, the way Go's `parsenum` does.
+///
+/// Go checks the accumulated value before taking each further digit, so `1000001` is
+/// still a width and `1000000000` is not. Past the cap it consumes the rest of the
+/// format string, which is why such a format reports a missing verb rather than a
+/// width: the verb is never reached.
 fn read_number(chars: &[char], at: &mut usize) -> Option<usize> {
-    let start = *at;
+    let mut value: usize = 0;
+    let mut any_digits = false;
     while *at < chars.len() && chars[*at].is_ascii_digit() {
+        if value > TOO_LARGE {
+            *at = chars.len();
+            return None;
+        }
+        value = value * 10 + (chars[*at] as usize - '0' as usize);
+        any_digits = true;
         *at += 1;
     }
-    if *at == start {
-        return None;
+    if any_digits {
+        Some(value)
+    } else {
+        None
     }
-    let digits: String = chars[start..*at].iter().collect();
-    // A run of digits longer than `usize` is not a width anyone meant.
-    digits.parse().ok()
 }
 
 /// Consumes the next argument as an integer, for a `*` width or precision.
@@ -242,7 +274,11 @@ mod test {
     #[test]
     fn plain_verbs() {
         check("foo%v2000", &["bar".into()], "foobar2000");
-        check("%+0v", &[1.into()], "+1");
+        // `%+v` does not sign a number: Go consumes the `+` for its field-name mode.
+        check("%+0v", &[1.into()], "1");
+        check("%+v", &[42.into()], "42");
+        check("%+v", &[Value::from(1.5)], "1.5");
+        check("% v", &[42.into()], " 42");
         check("foobar%d", &[2000.into()], "foobar2000");
         check("%+0d", &[1.into()], "+1");
         check("%+0b", &[5.into()], "+101");

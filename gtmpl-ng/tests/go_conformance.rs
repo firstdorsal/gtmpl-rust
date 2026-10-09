@@ -11,20 +11,29 @@ const FIXTURE: &str = include_str!("go_conformance.txt");
 
 #[test]
 fn formatting_matches_the_recorded_go_behaviour() {
+    // Pinned rather than bounded: a case commented out with the file's own `#` would
+    // otherwise vanish from the run without a trace, which is the one way this fixture
+    // can quietly stop covering what it says it covers.
+    const RECORDED_CASES: usize = 243;
+    const RECORDED_ERROR_CASES: usize = 12;
+
     let mut checked = 0;
+    let mut error_cases = 0;
     let mut failures: Vec<String> = Vec::new();
 
     for line in FIXTURE.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
             continue;
         }
-        let mut fields = line.split('\t');
-        let (Some(source), Some(outcome), Some(expected)) =
-            (fields.next(), fields.next(), fields.next())
-        else {
-            panic!("malformed fixture line: {:?}", line);
-        };
+        let fields: Vec<&str> = line.split('\t').collect();
+        // Exactly three: a stray tab inside an expectation would otherwise truncate it
+        // and the case would pass against a prefix.
+        assert_eq!(fields.len(), 3, "malformed fixture line: {:?}", line);
+        let (source, outcome, expected) = (fields[0], fields[1], fields[2]);
         checked += 1;
+        if outcome == "ERR" {
+            error_cases += 1;
+        }
 
         let rendered = template(&source.replace("\\n", "\n"), Value::Nil);
         let actual = match (&rendered, outcome) {
@@ -58,7 +67,14 @@ fn formatting_matches_the_recorded_go_behaviour() {
         }
     }
 
-    assert!(checked > 100, "the fixture went missing: {} cases", checked);
+    assert_eq!(
+        checked, RECORDED_CASES,
+        "the fixture's case count changed; update RECORDED_CASES deliberately"
+    );
+    assert_eq!(
+        error_cases, RECORDED_ERROR_CASES,
+        "an expectation changed between output and error; update RECORDED_ERROR_CASES deliberately"
+    );
     assert!(
         failures.is_empty(),
         "{} of {} cases drifted:\n\n{}",

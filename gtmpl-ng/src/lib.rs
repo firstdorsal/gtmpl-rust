@@ -35,16 +35,24 @@ pub use crate::template::Template;
 #[doc(inline)]
 pub use crate::exec::Context;
 
-#[doc(inline)]
-pub use gtmpl_value_ng::Func;
-
-pub use gtmpl_value_ng::FuncError;
-
-#[doc(inline)]
-pub use gtmpl_value_ng::from_value;
-
 pub use error::{ErrorContext, ExecError, ParseError, StructuredError, TemplateError};
-pub use gtmpl_value_ng::Value;
+
+/// The value type, re-exported whole.
+///
+/// `Value::Number` carries a [`Number`], a number is read through [`NumberKind`], and
+/// a custom function is built from [`Function`] -- so naming any of them through this
+/// crate has to work, or every example that does would need a second dependency on
+/// `gtmpl_value_ng` that the documented manifest never mentions.
+#[doc(inline)]
+pub use gtmpl_value_ng::{
+    format_float, from_value, write_float, FloatFormat, FromValue, Func, FuncError, Function,
+    Number, NumberKind, Value,
+};
+
+/// Why a `gtmpl_value::Value` from the published crate could not be converted.
+#[cfg(feature = "gtmpl_value_compat")]
+#[doc(inline)]
+pub use gtmpl_value_ng::FromLegacyValueError;
 
 /// Provides simple basic templating given just a template sting and context.
 ///
