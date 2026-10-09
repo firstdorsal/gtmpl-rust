@@ -109,6 +109,32 @@ nodes!(
 
 pub type Pos = usize;
 
+/// Where a node sits in its template source.
+///
+/// A node starts at its first token but ends with its last child, so the span is
+/// assembled while parsing and handed to the constructor once it is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeSpan {
+    pub tree: TreeId,
+    pub pos: Pos,
+    pub line: usize,
+    pub col: usize,
+    pub len: usize,
+}
+
+impl NodeSpan {
+    /// A span covering a single token.
+    pub fn token(tree: TreeId, pos: Pos, line: usize, col: usize, len: usize) -> NodeSpan {
+        NodeSpan {
+            tree,
+            pos,
+            line,
+            col,
+            len,
+        }
+    }
+}
+
 pub type TreeId = usize;
 
 pub trait Node: Display {
@@ -134,15 +160,6 @@ macro_rules! node {
             len: usize,
             tr: TreeId,
             $(pub $field: $typ,)*
-        }
-        impl $name {
-            /// Widens this node's recorded source span once its extent is known. A
-            /// node that is built incrementally cannot know its span at construction
-            /// time: it ends at the last token the node consumes, which is only
-            /// reached after its children are parsed.
-            pub fn set_len(&mut self, len: usize) {
-                self.len = len;
-            }
         }
         impl Node for $name {
             fn typ(&self) -> &NodeType {
@@ -189,6 +206,15 @@ node!(
 );
 
 impl ListNode {
+    /// Records the span now that the children are parsed and the extent is known.
+    /// Consuming `self` makes this a step in building the node rather than a mutation
+    /// that could be repeated, forgotten, or applied at the wrong moment.
+    pub fn finish(mut self, end: Pos) -> Self {
+        debug_assert!(end >= self.pos, "node ends before it starts");
+        self.len = end - self.pos;
+        self
+    }
+
     pub fn append(&mut self, n: Nodes) {
         self.nodes.push(n);
     }
@@ -218,9 +244,7 @@ impl ListNode {
 impl Display for ListNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         for n in &self.nodes {
-            if let Err(e) = n.fmt(f) {
-                return Err(e);
-            }
+            n.fmt(f)?;
         }
         Ok(())
     }
@@ -264,6 +288,15 @@ node!(
 );
 
 impl PipeNode {
+    /// Records the span now that the children are parsed and the extent is known.
+    /// Consuming `self` makes this a step in building the node rather than a mutation
+    /// that could be repeated, forgotten, or applied at the wrong moment.
+    pub fn finish(mut self, end: Pos) -> Self {
+        debug_assert!(end >= self.pos, "node ends before it starts");
+        self.len = end - self.pos;
+        self
+    }
+
     pub fn new(
         tr: TreeId,
         pos: Pos,
@@ -356,6 +389,15 @@ node!(
 );
 
 impl CommandNode {
+    /// Records the span now that the children are parsed and the extent is known.
+    /// Consuming `self` makes this a step in building the node rather than a mutation
+    /// that could be repeated, forgotten, or applied at the wrong moment.
+    pub fn finish(mut self, end: Pos) -> Self {
+        debug_assert!(end >= self.pos, "node ends before it starts");
+        self.len = end - self.pos;
+        self
+    }
+
     pub fn new(tr: TreeId, pos: Pos, line: usize, col: usize, len: usize) -> CommandNode {
         CommandNode {
             typ: NodeType::Command,
@@ -390,6 +432,19 @@ impl Display for CommandNode {
 node!(IdentifierNode { ident: String });
 
 impl IdentifierNode {
+    /// An identifier at a known location.
+    pub fn at(span: NodeSpan, ident: String) -> IdentifierNode {
+        IdentifierNode {
+            typ: NodeType::Identifier,
+            tr: span.tree,
+            pos: span.pos,
+            line: span.line,
+            col: span.col,
+            len: span.len,
+            ident,
+        }
+    }
+
     pub fn new(ident: String) -> IdentifierNode {
         IdentifierNode {
             typ: NodeType::Identifier,
@@ -400,26 +455,6 @@ impl IdentifierNode {
             len: 0,
             ident,
         }
-    }
-
-    pub fn set_pos(&mut self, pos: Pos) -> &IdentifierNode {
-        self.pos = pos;
-        self
-    }
-
-    pub fn set_line(&mut self, line: usize) -> &IdentifierNode {
-        self.line = line;
-        self
-    }
-
-    pub fn set_col(&mut self, col: usize) -> &IdentifierNode {
-        self.col = col;
-        self
-    }
-
-    pub fn set_tree(&mut self, tr: TreeId) -> &IdentifierNode {
-        self.tr = tr;
-        self
     }
 }
 
@@ -554,6 +589,15 @@ node!(
 );
 
 impl ChainNode {
+    /// Records the span now that the children are parsed and the extent is known.
+    /// Consuming `self` makes this a step in building the node rather than a mutation
+    /// that could be repeated, forgotten, or applied at the wrong moment.
+    pub fn finish(mut self, end: Pos) -> Self {
+        debug_assert!(end >= self.pos, "node ends before it starts");
+        self.len = end - self.pos;
+        self
+    }
+
     pub fn new(
         tr: TreeId,
         pos: Pos,
@@ -582,16 +626,12 @@ impl ChainNode {
 
 impl Display for ChainNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        if let Err(e) = {
+        {
             // Handle PipeNode.
             write!(f, "{}", self.node)
-        } {
-            return Err(e);
-        }
+        }?;
         for field in &self.field {
-            if let Err(e) = write!(f, ".{}", field) {
-                return Err(e);
-            }
+            write!(f, ".{}", field)?;
         }
         Ok(())
     }
@@ -969,22 +1009,18 @@ pub type RangeNode = BranchNode;
 
 impl BranchNode {
     pub fn new_if(
-        tr: TreeId,
-        pos: Pos,
-        line: usize,
-        col: usize,
-        len: usize,
+        span: NodeSpan,
         pipe: PipeNode,
         list: ListNode,
         else_list: Option<ListNode>,
     ) -> IfNode {
         IfNode {
             typ: NodeType::If,
-            tr,
-            pos,
-            line,
-            col,
-            len,
+            tr: span.tree,
+            pos: span.pos,
+            line: span.line,
+            col: span.col,
+            len: span.len,
             pipe,
             list,
             else_list,
@@ -992,22 +1028,18 @@ impl BranchNode {
     }
 
     pub fn new_with(
-        tr: TreeId,
-        pos: Pos,
-        line: usize,
-        col: usize,
-        len: usize,
+        span: NodeSpan,
         pipe: PipeNode,
         list: ListNode,
         else_list: Option<ListNode>,
     ) -> WithNode {
         WithNode {
             typ: NodeType::With,
-            tr,
-            pos,
-            line,
-            col,
-            len,
+            tr: span.tree,
+            pos: span.pos,
+            line: span.line,
+            col: span.col,
+            len: span.len,
             pipe,
             list,
             else_list,
@@ -1015,22 +1047,18 @@ impl BranchNode {
     }
 
     pub fn new_range(
-        tr: TreeId,
-        pos: Pos,
-        line: usize,
-        col: usize,
-        len: usize,
+        span: NodeSpan,
         pipe: PipeNode,
         list: ListNode,
         else_list: Option<ListNode>,
     ) -> RangeNode {
         RangeNode {
             typ: NodeType::Range,
-            tr,
-            pos,
-            line,
-            col,
-            len,
+            tr: span.tree,
+            pos: span.pos,
+            line: span.line,
+            col: span.col,
+            len: span.len,
             pipe,
             list,
             else_list,
