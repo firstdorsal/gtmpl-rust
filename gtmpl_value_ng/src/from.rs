@@ -38,7 +38,7 @@ impl From<bool> for Value {
 }
 
 impl<'a> From<&'a String> for Value {
-    /// Convert &String to `Value`
+    /// Convert `&String` to `Value`
     ///
     /// # Examples
     ///
@@ -54,7 +54,7 @@ impl<'a> From<&'a String> for Value {
 }
 
 impl From<String> for Value {
-    /// Convert String to `Value`
+    /// Convert `String` to `Value`
     ///
     /// # Examples
     ///
@@ -70,7 +70,7 @@ impl From<String> for Value {
 }
 
 impl From<&str> for Value {
-    /// Convert &str to `Value`
+    /// Convert `&str` to `Value`
     ///
     /// # Examples
     ///
@@ -86,7 +86,7 @@ impl From<&str> for Value {
 }
 
 impl<'a> From<Cow<'a, str>> for Value {
-    /// Convert Cow<str> to `Value`
+    /// Convert `Cow<str>` to `Value`
     ///
     /// # Examples
     ///
@@ -103,7 +103,7 @@ impl<'a> From<Cow<'a, str>> for Value {
 }
 
 impl From<Func> for Value {
-    /// Convert Func to `Value`
+    /// Convert `Func` to `Value`
     ///
     /// # Examples
     ///
@@ -124,7 +124,7 @@ impl<T> From<Vec<T>> for Value
 where
     T: Into<Value> + Clone,
 {
-    /// Convert Vec to `Value`
+    /// Convert `Vec` to `Value`
     ///
     /// # Examples
     ///
@@ -143,7 +143,7 @@ impl<'a, T> From<&'a [T]> for Value
 where
     T: Into<Value> + Clone,
 {
-    /// Convert Slice to `Value`
+    /// Convert a slice to `Value`
     ///
     /// # Examples
     ///
@@ -162,7 +162,7 @@ impl<T> From<HashMap<String, T>> for Value
 where
     T: Into<Value> + Clone,
 {
-    /// Convert HashMap<String, T> to `Value`
+    /// Convert `HashMap<String, T>` to `Value`
     ///
     /// # Examples
     ///
@@ -187,7 +187,7 @@ impl<T> From<Option<T>> for Value
 where
     T: Into<Value> + Clone,
 {
-    /// Convert Option<T> to `Value`
+    /// Convert `Option<T>` to `Value`
     ///
     /// # Examples
     ///

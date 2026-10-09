@@ -391,7 +391,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         if chain.field.is_empty() {
             return Err(ExecError::NoFieldsInEvalChainNode);
         }
-        let pipe = self.eval_arg(ctx, &*chain.node)?;
+        let pipe = self.eval_arg(ctx, &chain.node)?;
         self.eval_field_chain(&pipe, &chain.field, args, fin)
     }
 
@@ -507,7 +507,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
 
         match resolve_field(receiver, field_name)? {
             FieldOutcome::Found(Value::Function(f)) => {
-                (f.f)(&[receiver.clone()]).map_err(Into::into)
+                (f.f)(std::slice::from_ref(receiver)).map_err(Into::into)
             }
             FieldOutcome::Found(field) => Ok(field.clone()),
             FieldOutcome::Absent => Ok(Value::NoValue),

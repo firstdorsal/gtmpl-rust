@@ -511,7 +511,7 @@ mod tests {
         map.insert("a".to_string(), Value::Number(1.into()));
         let dict = Value::Map(map);
 
-        let result = deep_copy(&[dict.clone()]).unwrap();
+        let result = deep_copy(std::slice::from_ref(&dict)).unwrap();
         assert_eq!(result, dict);
     }
 

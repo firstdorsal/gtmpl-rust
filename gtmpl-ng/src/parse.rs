@@ -810,8 +810,7 @@ impl Parser {
                         | NodeType::Number
                         | NodeType::Nil
                         | NodeType::Dot => {
-                            return self
-                                .error(&format!("unexpected . after term {}", n.to_string()));
+                            return self.error(&format!("unexpected . after term {}", n));
                         }
                         _ => {}
                     };

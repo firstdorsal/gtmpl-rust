@@ -40,11 +40,11 @@ pub fn to_yaml(args: &[Value]) -> Result<Value, FuncError> {
         1,
     ))?;
 
-    let yaml =
-        serde_yaml_neo::to_string(&gtmpl_value_to_serde_yaml_value(value).map_err(|e| {
-            FuncError::Generic(format!("Error converting to yaml: {}", e.to_string()))
-        })?)
-        .map_err(|e| FuncError::Generic(e.to_string()))?;
+    let yaml = serde_yaml_neo::to_string(
+        &gtmpl_value_to_serde_yaml_value(value)
+            .map_err(|e| FuncError::Generic(format!("Error converting to yaml: {}", e)))?,
+    )
+    .map_err(|e| FuncError::Generic(e.to_string()))?;
 
     Ok(Value::String(yaml))
 }
@@ -67,11 +67,11 @@ pub fn to_json(args: &[Value]) -> Result<Value, FuncError> {
         1,
     ))?;
 
-    let json =
-        serde_json::to_string(&gtmpl_value_to_serde_json_value(value).map_err(|e| {
-            FuncError::Generic(format!("Error converting to json: {}", e.to_string()))
-        })?)
-        .map_err(|e| FuncError::Generic(e.to_string()))?;
+    let json = serde_json::to_string(
+        &gtmpl_value_to_serde_json_value(value)
+            .map_err(|e| FuncError::Generic(format!("Error converting to json: {}", e)))?,
+    )
+    .map_err(|e| FuncError::Generic(e.to_string()))?;
 
     Ok(Value::String(json))
 }
@@ -82,11 +82,11 @@ pub fn to_pretty_json(args: &[Value]) -> Result<Value, FuncError> {
         1,
     ))?;
 
-    let json =
-        serde_json::to_string_pretty(&gtmpl_value_to_serde_json_value(value).map_err(|e| {
-            FuncError::Generic(format!("Error converting to json: {}", e.to_string()))
-        })?)
-        .map_err(|e| FuncError::Generic(e.to_string()))?;
+    let json = serde_json::to_string_pretty(
+        &gtmpl_value_to_serde_json_value(value)
+            .map_err(|e| FuncError::Generic(format!("Error converting to json: {}", e)))?,
+    )
+    .map_err(|e| FuncError::Generic(e.to_string()))?;
 
     Ok(Value::String(json))
 }

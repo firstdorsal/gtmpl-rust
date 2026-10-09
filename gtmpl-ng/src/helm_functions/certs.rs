@@ -210,13 +210,13 @@ pub fn gen_signed_cert(args: &[Value]) -> Result<Value, FuncError> {
         .push(ExtendedKeyUsagePurpose::ServerAuth);
 
     let ca_key_pair = rcgen::KeyPair::from_pem(&ca_key_pair_pem)
-        .map_err(|e| FuncError::Generic(format!("Error generating key pair: {}", e.to_string())))?;
+        .map_err(|e| FuncError::Generic(format!("Error generating key pair: {}", e)))?;
 
     // Parse the CA certificate PEM to extract information
     let ca_cert = parse_ca_cert_and_rebuild(&ca_cert_pem, &ca_key_pair)?;
 
     let own_key_pair = rcgen::KeyPair::generate()
-        .map_err(|e| FuncError::Generic(format!("Error generating key pair: {}", e.to_string())))?;
+        .map_err(|e| FuncError::Generic(format!("Error generating key pair: {}", e)))?;
 
     let cert = own_cert_params
         .signed_by(&own_key_pair, &ca_cert, &ca_key_pair)
@@ -304,7 +304,7 @@ pub fn gen_self_signed_cert(args: &[Value]) -> Result<Value, FuncError> {
         .push(ExtendedKeyUsagePurpose::ServerAuth);
 
     let key_pair = rcgen::KeyPair::generate()
-        .map_err(|e| FuncError::Generic(format!("Error generating key pair: {}", e.to_string())))?;
+        .map_err(|e| FuncError::Generic(format!("Error generating key pair: {}", e)))?;
 
     let cert = cert_params
         .self_signed(&key_pair)

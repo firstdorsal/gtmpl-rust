@@ -1,8 +1,15 @@
 # Changes
 
-## 0.5.0
-* gtmpl_value 0.5
+This crate is released with the engine under one version. See
+[the workspace changelog](../CHANGES.md).
 
-## 0.4.0
-* Rust 2018
-* Update dependencies
+## Before the fork
+
+`gtmpl_derive_ng` continues `gtmpl_derive` from its `master` branch at `ac32ea9`.
+
+### [0.5.0]
+- gtmpl_value 0.5
+
+### [0.4.0]
+- Rust 2018
+- Update dependencies

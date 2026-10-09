@@ -1,5 +1,107 @@
 # Changes
 
+All three crates in this repository share one version and are released together.
+
+## [0.9.0] - 2026-10-09
+
+The value type and the derive macro now live in this repository as `gtmpl_value_ng`
+and `gtmpl_derive_ng`, so `Value` is finally ours to fix. Most of what follows is the
+consequence: formatting, which was constrained by the old crate, now matches Go.
+
+Expectations were taken from Go 1.26.8 rendering the equivalent input. 141 templates
+were diffed against it; 134 match byte for byte, and `gtmpl-ng/tests/go_conformance.txt`
+records every one of them, with its header listing the seven that differ and why.
+
+### Breaking
+
+- **`gtmpl_value` and `gtmpl_derive` are replaced by `gtmpl_value_ng` and
+  `gtmpl_derive_ng`.** `gtmpl_ng::Value`, `Func`, `FuncError` and `from_value` are
+  re-exported unchanged, so code that only touches those keeps compiling. Code that
+  uses `#[derive(Gtmpl)]` has to change one import per crate: `Into` is not
+  transitive, so a value from the published derive will not satisfy a bound asking for
+  the new type, and the error lands at the call site. Alternatively enable
+  `gtmpl_value_ng`'s `gtmpl_value_compat` feature and convert with `Value::try_from`.
+- **`printf` no longer fails on a bad verb.** Go writes `%!d(string=x)` into the
+  output and carries on; so does this. `PrintError` is removed — nothing could
+  construct it any more.
+- **`ExecError::NullInChain` is removed.** It was unreachable: `ChainNode` has one
+  producer, which rejects a `nil` base before building one.
+- **`NodeError::NaN` is now `NodeError::IllegalNumberSyntax(String)`**, carrying the
+  literal, as Go's message does.
+- A float outside the integers is no longer collapsed to one, so `as_u64()` on a
+  `Value::from(1e20)` now answers `None` where it used to answer `u64::MAX`.
+- The edition moves to 2021 across the workspace, which requires a 2021-capable
+  toolchain to build from source.
+
+### Added
+
+- `gtmpl_value_ng::format_float`, which implements Go's `strconv.FormatFloat` rules,
+  and `FloatFormat` to pick between them.
+- `Number::kind` and `NumberKind`, so a number is read once instead of by trying
+  `as_u64`/`as_i64`/`as_f64` in the right order.
+- `Number::float`, `Number::signed` and `Number::unsigned`, which build a number
+  without the whole-float collapse. The absence of a lossless float constructor was
+  what made #13 unfixable from outside.
+- `gtmpl_value_ng`'s `gtmpl_value_compat` feature: `TryFrom<gtmpl_value::Value>`, for
+  migrating a tree one call site at a time. It is `TryFrom` because a
+  `gtmpl_value::Func` names the other crate's `Value` in its own signature and cannot
+  be converted at all.
+- Hexadecimal float literals: `{{ 0x1.8p1 }}` is `3` (#15).
+- Go's `%!…` notation in full: `%!d(string=x)`, `%!d(MISSING)`, `%!(EXTRA int=2)`,
+  `%!(NOVERB)`, `%!d(BADINDEX)`, `%!(BADWIDTH)` and `%!(BADPREC)`.
+- `#[derive(Gtmpl)]` on a tuple struct, an enum or a union is a compile error with a
+  span, reported through `syn::Error` rather than a proc-macro panic. A tuple struct
+  used to compile and produce an empty object, dropping every field silently.
+
+### Changed
+
+- **A container renders as Go renders it.** An array used to go through Rust's `Debug`
+  — `[String("a"), Bool(true)]` — where Go writes `[a true]`, and a map
+  `{"k": String("v")}` where Go writes `map[k:v]`.
+- **A map's keys are sorted when formatted**, as Go has sorted them since 1.12.
+  0.8.0 fixed the order for `range`; `printf "%v"` on a map was still different from
+  run to run.
+- **`%v` on a float uses Go's rules**, so `1e20` renders `1e+20` rather than
+  `100000000000000000000`, and `+Inf`/`NaN` rather than `inf`/`NaN`.
+- `%e` and `%E` write Go's exponent: `1.234568e+03`, not Rust's `e3` (#14).
+- `Value::Nil` renders as `<nil>`, the way Go prints a nil, rather than `nil`.
+- `serde_yaml` is deprecated and archived upstream; the Helm YAML functions use the
+  maintained `serde_yaml_neo` fork. One behaviour follows from it, and it is a fix:
+  `fromYaml` now reads a leading-zero integer as octal, so `0644` is `420`, which is
+  what Go's YAML readers and Helm do.
+- A list's span runs through its `{{end}}`. A branch's own length is only its
+  pipeline's span — deliberately, so an error in `{{if .x}}` points at `.x` — and a
+  list measured its extent from that, claiming ten bytes of a twenty-byte
+  `{{if .cond}}x{{end}}` (#17).
+
+### Fixed
+
+- **Negative non-integer numbers are no longer truncated** (#13). `{{ -3.14 }}`
+  renders `-3.14`. The fix existed on `gtmpl_value`'s master branch, unreleased, since
+  February 2025; vendoring the crate is what delivered it.
+- **A float outside the integers is no longer replaced by a different number.** The
+  whole-float collapse cast with `as`, which saturates, so `Value::from(1e20)` became
+  `u64::MAX` and `-1e20` became `i64::MIN`.
+- **A float below about 2e-16 is no longer collapsed to zero.** "Whole" was tested as
+  `fract() < EPSILON`, which every such magnitude satisfies, so `1e-20` became `0`.
+- `-0.0` renders as `-0`.
+- `%-5d` left-aligns and `%6.3s` pads on the left. Flag handling was a match over
+  thirteen hand-written combinations, and anything it did not list fell through to
+  Rust's defaults, which differ from Go's.
+- `%#o` writes Go's bare leading zero rather than Rust's `0o` prefix, and `%#X` writes
+  `0X`.
+- `%q` takes its ASCII-escaping cue from `+`, as Go does, and `#` asks for a
+  backquoted string; `%q` on a string is quoted at all, which it was not.
+- `%.3d`, `%08.3d` and `%#08x` pad the way Go pads: zeros between the sign and the
+  digits, an explicit precision overriding the zero flag, and the `0x` prefix outside
+  the zero count.
+- `cargo test` no longer reports success having run neither panic suite. Three of
+  their cases never needed the optional registry and now run by default; the rest
+  report an ignored test naming the feature they need (#16).
+- Deprecated `std::f64::EPSILON`-style constants and an unlinted function pointer
+  comparison are gone from the vendored crates, which now pass the same
+  `clippy -D warnings` gate as the engine.
+
 ## [0.8.0] - 2026-10-09
 
 Behaviour in this release moves closer to Go's `text/template` in several places, so

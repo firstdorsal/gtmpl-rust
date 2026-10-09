@@ -323,7 +323,11 @@ mod test {
     #[test]
     fn a_container_is_marked_element_by_element() {
         let array = Value::Array(vec![1.into(), "a".into(), true.into()]);
-        check("%d", &[array.clone()], "[1 %!d(string=a) %!d(bool=true)]");
+        check(
+            "%d",
+            std::slice::from_ref(&array),
+            "[1 %!d(string=a) %!d(bool=true)]",
+        );
         check("%v", &[array], "[1 a true]");
 
         let mut map: HashMap<String, Value> = HashMap::new();

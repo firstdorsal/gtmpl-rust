@@ -148,7 +148,7 @@ impl Number {
 
     /// Builds a float, keeping it a float even when its value is whole.
     ///
-    /// This is the difference to [`From<f64>`](#impl-From<f64>-for-Number), which
+    /// This is the difference to the `From<f64>` conversion, which
     /// stores a whole float as an integer so that `{{ 3.0 }}` renders `3` the way Go
     /// does. That collapse is lossy — `as_f64` then reports `None` — and this
     /// constructor is the way to avoid it.

@@ -152,9 +152,8 @@ pub fn or(args: &[Value]) -> Result<Value, FuncError> {
             return Ok(arg.clone());
         }
     }
-    args.iter()
+    args.last()
         .cloned()
-        .last()
         .ok_or_else(|| FuncError::AtLeastXArgs("or".into(), 1))
 }
 
@@ -175,9 +174,8 @@ pub fn and(args: &[Value]) -> Result<Value, FuncError> {
             return Ok(arg.clone());
         }
     }
-    args.iter()
+    args.last()
         .cloned()
-        .last()
         .ok_or_else(|| FuncError::AtLeastXArgs("and".into(), 1))
 }
 
@@ -352,7 +350,7 @@ pub fn printf(args: &[Value]) -> Result<Value, FuncError> {
 
 /// Returns the result of indexing its first argument by the
 /// following arguments. Thus "index x 1 2 3" is, in Go syntax,
-/// x[1][2][3]. Each indexed item must be a map, slice or array.
+/// `x[1][2][3]`. Each indexed item must be a map, slice or array.
 ///
 /// # Example
 /// ```
