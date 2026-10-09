@@ -529,9 +529,29 @@ impl LexerStateMachine {
     }
 
     fn lex_space(&mut self) -> State {
+        // The first space was already consumed by `lex_inside_action`.
+        let mut spaces = 1;
+        let mut last_space = self.pos - self.width;
         while self.peek().map(|c| c.is_whitespace()).unwrap_or_default() {
+            last_space = self.pos;
             self.next();
+            spaces += 1;
         }
+
+        // A trim-marked right delimiter is a space followed by `-}}`, and that space
+        // belongs to the delimiter rather than to this run. `at_right_delim` only
+        // looks at the current position, so hand the space back before emitting --
+        // otherwise the `-` is lexed as a number and becomes a stray argument.
+        // The character at `last_space` is a plain space whenever the marker
+        // matches, so resetting the offset cannot undo any line bookkeeping.
+        let right_trim_delim = format!("{}{}", RIGHT_TRIM_MARKER, RIGHT_DELIM);
+        if self.input[last_space..].starts_with(&right_trim_delim) {
+            self.pos = last_space;
+            if spaces == 1 {
+                return State::LexRightDelim;
+            }
+        }
+
         self.emit(ItemType::ItemSpace);
         State::LexInsideAction
     }
