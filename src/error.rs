@@ -3,11 +3,24 @@ use gtmpl_value::{FuncError, Value};
 use std::{fmt, num::ParseIntError, string::FromUtf8Error};
 use thiserror::Error;
 
+/// Where in a template an error came from, so a caller can point at it.
+///
+/// `line` and `col` are 1-based, `col` and `len` are byte offsets into that line.
+/// Together they delimit the construct that failed, which is what makes
+/// `line[col - 1..col - 1 + len]` the offending expression.
 #[derive(Debug, Clone)]
 pub struct ErrorContext {
+    /// Name of the template the error came from; empty for an unnamed one.
     pub name: String,
+    /// 1-based line number.
     pub line: usize,
+    /// 1-based byte column of the first character of the construct.
     pub col: usize,
+    /// Byte length of the whole construct.
+    ///
+    /// Since 0.8.0 this spans the entire construct. Before that it was the length
+    /// of the construct's first token only, so `{{.a.b}}` reported `2` rather
+    /// than `4`.
     pub len: usize,
 }
 
@@ -83,6 +96,7 @@ impl fmt::Display for StructuredError {
 }
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum ParseError {
     #[error("unexpected {0} in define clause")]
     UnexpectedInDefineClause(Nodes),
@@ -153,6 +167,7 @@ pub enum PrintError {
 }
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum ExecError {
     #[error("{0}")]
     Structured(StructuredError),

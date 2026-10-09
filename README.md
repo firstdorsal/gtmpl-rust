@@ -19,7 +19,7 @@ Add the following dependency to your Cargo manifest…
 
 ```toml
 [dependencies]
-gtmpl-ng = "0.7"
+gtmpl-ng = "0.8"
 ```
 
 and look at the docs:
@@ -107,14 +107,37 @@ fn main() {
 }
 ```
 
+## Template Semantics
+
+Behaviour follows Go's `text/template`:
+
+-   **Variables** are declared with `:=` and reassigned with `=`. A declaration is
+    scoped to its block, an assignment updates the nearest existing binding, so a
+    loop can accumulate into a variable declared outside it:
+
+    ```text
+    {{ $acc := "seed" }}{{ range . }}{{ $acc = printf "%s-%d" $acc . }}{{ end }}{{ $acc }}
+    ```
+
+-   **Map keys are iterated in sorted order**, which makes rendering deterministic.
+-   **`{{ else }}` on a `range`** runs only when the collection is empty, and ranging
+    over nil takes that branch rather than failing.
+-   **A missing map key ends a field chain** and renders as `<no value>`, however deep
+    the chain is, so `{{ if .a.b.c }}` is simply false when any level is absent. A
+    receiver of the wrong type still errors.
+
 ## Current Limitations
 
 This is work in progress. Currently the following features are not supported:
 
 -   complex numbers
+-   integer literals other than decimal: hex, binary and octal evaluate wrongly
+    (see issue #5)
 -   the following functions have not been implemented:
     -   `html`, `js`
 -   `printf` is not yet fully stable, but should support all _sane_ input
+-   declaring a variable from a large value (`{{ $top := . }}`) copies it; field reads
+    through the variable do not
 
 ## Enhancements
 
@@ -127,7 +150,7 @@ Enable `helm-functions` to get 152 Helm-compatible template functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.7"
+version = "0.8"
 features = ["helm-functions"]
 ```
 
@@ -150,7 +173,7 @@ Enable `mows-functions` to get 3 additional mows-specific functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.7"
+version = "0.8"
 features = ["mows-functions"]
 ```
 
@@ -165,7 +188,7 @@ Enable `all-functions` to get both Helm and mows functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.7"
+version = "0.8"
 features = ["all-functions"]
 ```
 
@@ -183,7 +206,7 @@ Enable `gtmpl_dynamic_template` in your `Cargo.toml`:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.7"
+version = "0.8"
 features = ["gtmpl_dynamic_template"]
 ```
 
