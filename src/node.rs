@@ -636,6 +636,111 @@ node!(NumberNode {
     value: Value,
 });
 
+/// A numeric literal, classified the way Go's `strconv.ParseInt(text, 0, 64)` does.
+enum IntegerLiteral {
+    /// A legal integer literal, split into the parts `from_str_radix` needs.
+    Legal {
+        negative: bool,
+        digits: String,
+        radix: u32,
+    },
+    /// Not an integer literal at all, so the floating point syntax should be tried.
+    NotInteger,
+    /// Shaped like an integer literal but not a legal one.
+    Malformed,
+}
+
+/// Removes Go's `_` separators from a run of digits.
+///
+/// Go requires every separator to sit between two digits, with one extra allowed
+/// directly after a base prefix, so `1_000` and `0x_ff` are legal while `_1`, `1_`
+/// and `1__0` are not.
+fn strip_digit_separators(digits: &str, after_base_prefix: bool) -> Option<String> {
+    if digits.contains("__") || digits.ends_with('_') {
+        return None;
+    }
+    if digits.starts_with('_') && !after_base_prefix {
+        return None;
+    }
+    let stripped: String = digits.chars().filter(|c| *c != '_').collect();
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped)
+    }
+}
+
+/// Classifies `text` as a Go integer literal.
+///
+/// Rust's `from_str_radix` takes neither a base prefix nor `_` separators, so the
+/// prefix is resolved and the separators are checked and removed here. A bare leading
+/// zero means octal for an integer but not for a float, which is why `0.5` and `0e1`
+/// come back as `NotInteger` while `017` is octal and `08` is malformed.
+fn classify_integer_literal(text: &str) -> IntegerLiteral {
+    let (negative, body) = match text.chars().next() {
+        Some('-') => (true, &text[1..]),
+        Some('+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    if body.is_empty() {
+        return IntegerLiteral::Malformed;
+    }
+
+    let prefixed = body
+        .strip_prefix('0')
+        .and_then(|rest| match rest.chars().next() {
+            Some('x') | Some('X') => Some((16, &rest[1..])),
+            Some('o') | Some('O') => Some((8, &rest[1..])),
+            Some('b') | Some('B') => Some((2, &rest[1..])),
+            _ => None,
+        });
+
+    if let Some((radix, digits)) = prefixed {
+        return match strip_digit_separators(digits, true) {
+            Some(digits) if digits.chars().all(|c| c.is_digit(radix)) => IntegerLiteral::Legal {
+                negative,
+                digits,
+                radix,
+            },
+            _ => IntegerLiteral::Malformed,
+        };
+    }
+
+    // A fraction or an exponent makes this a float, whatever the leading digit is.
+    if body.contains(['.', 'e', 'E']) {
+        return IntegerLiteral::NotInteger;
+    }
+
+    let digits = match strip_digit_separators(body, false) {
+        Some(digits) => digits,
+        None => return IntegerLiteral::Malformed,
+    };
+
+    if let Some(octal) = digits.strip_prefix('0') {
+        if !octal.is_empty() {
+            return if octal.chars().all(|c| c.is_digit(8)) {
+                IntegerLiteral::Legal {
+                    negative,
+                    digits: octal.to_owned(),
+                    radix: 8,
+                }
+            } else {
+                IntegerLiteral::Malformed
+            };
+        }
+    }
+
+    if digits.chars().all(|c| c.is_ascii_digit()) {
+        IntegerLiteral::Legal {
+            negative,
+            digits,
+            radix: 10,
+        }
+    } else {
+        IntegerLiteral::Malformed
+    }
+}
+
 impl NumberNode {
     #[allow(clippy::float_cmp)]
     pub fn new(
@@ -665,47 +770,65 @@ impl NumberNode {
                 })
                 .ok_or(NodeError::UnquoteError),
             _ => {
-                let mut number_typ = NumberType::Float;
+                // Mirrors Go's `newNumber`: read it as an integer first so a base
+                // prefix is honoured, and fall back to the float syntax only when no
+                // integer reading applies.
+                let mut as_i64 = 0i64;
+                let mut as_u64 = 0u64;
+                let mut is_i64 = false;
+                let mut is_u64 = false;
 
-                // TODO: Deal with hex.
-                let (mut as_i64, mut is_i64) = text
-                    .parse::<i64>()
-                    .map(|i| (i, true))
-                    .unwrap_or((0i64, false));
-
-                if is_i64 {
-                    number_typ = NumberType::I64;
-                }
-
-                let (mut as_u64, mut is_u64) = text
-                    .parse::<u64>()
-                    .map(|i| (i, true))
-                    .unwrap_or((0u64, false));
-
-                if is_u64 {
-                    number_typ = NumberType::U64;
-                }
-
-                if is_i64 && as_i64 == 0 {
-                    // In case of -0.
-                    as_u64 = 0;
-                    is_u64 = true;
-                }
-
-                let (as_f64, is_f64) = match text.parse::<f64>() {
-                    Err(_) => (0.0_f64, false),
-                    Ok(f) => {
-                        let frac = text.contains(|c| {
-                            matches! {
-                            c, '.' | 'e' | 'E' }
-                        });
-                        if frac {
-                            (f, true)
+                match classify_integer_literal(&text) {
+                    IntegerLiteral::Malformed => return Err(NodeError::NaN),
+                    IntegerLiteral::Legal {
+                        negative,
+                        digits,
+                        radix,
+                    } => {
+                        if !negative {
+                            if let Ok(parsed) = u64::from_str_radix(&digits, radix) {
+                                as_u64 = parsed;
+                                is_u64 = true;
+                            }
+                        }
+                        let signed = if negative {
+                            format!("-{}", digits)
                         } else {
-                            (f, false)
+                            digits
+                        };
+                        if let Ok(parsed) = i64::from_str_radix(&signed, radix) {
+                            as_i64 = parsed;
+                            is_i64 = true;
+                            if parsed == 0 {
+                                // In case of -0.
+                                as_u64 = 0;
+                                is_u64 = true;
+                            }
+                        }
+                        if !is_i64 && !is_u64 {
+                            // Too large for either, which Go reports as an overflow.
+                            return Err(NodeError::NaN);
                         }
                     }
+                    IntegerLiteral::NotInteger => {}
+                }
+
+                // `is_f64` records that the literal was written as a fraction, which
+                // is what decides how it renders; an integer is promoted to a float
+                // value as well, as Go does, but keeps its integer shape.
+                let (as_f64, is_f64) = if is_i64 || is_u64 {
+                    let promoted = if is_i64 { as_i64 as f64 } else { as_u64 as f64 };
+                    (promoted, false)
+                } else {
+                    let stripped: String = text.chars().filter(|c| *c != '_').collect();
+                    match stripped.parse::<f64>() {
+                        Ok(parsed) => (parsed, true),
+                        Err(_) => return Err(NodeError::NaN),
+                    }
                 };
+
+                // A whole float still reads as an integer, so `{{ 1e3 }}` renders
+                // `1000` rather than `1000.0`.
                 if !is_i64 && ((as_f64 as i64) as f64) == as_f64 {
                     as_i64 = as_f64 as i64;
                     is_i64 = true;
@@ -714,9 +837,14 @@ impl NumberNode {
                     as_u64 = as_f64 as u64;
                     is_u64 = true;
                 }
-                if !is_u64 && !is_i64 && !is_f64 {
-                    return Err(NodeError::NaN);
-                }
+
+                let number_typ = if is_f64 {
+                    NumberType::Float
+                } else if is_u64 {
+                    NumberType::U64
+                } else {
+                    NumberType::I64
+                };
 
                 let value = if is_u64 {
                     Value::from(as_u64)
