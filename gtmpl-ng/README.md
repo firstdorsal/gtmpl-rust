@@ -19,7 +19,7 @@ Add the following dependency to your Cargo manifest…
 
 ```toml
 [dependencies]
-gtmpl-ng = "0.8"
+gtmpl-ng = "0.9"
 ```
 
 and look at the docs:
@@ -138,22 +138,25 @@ Use `--all-features`:
 cargo test --all-features
 ```
 
-Several suites — including both panic-regression suites — run through the optional
-function registries. Under the default feature set they compile to zero tests, and
-`cargo test` reports success having run none of them.
+`panic_audit.rs` and `panic_regressions.rs` run through the optional helm function
+registry, so a plain `cargo test` leaves them out. They are reported as ignored rather
+than silently skipped (see `tests/feature_gates.rs`); run the whole suite with
+`cargo test --workspace --all-features`, or the `cargo test-all` alias.
 
 ## Current Limitations
 
 This is work in progress. Currently the following features are not supported:
 
 -   complex numbers
--   **negative non-integer numbers are truncated** — `{{ -3.14 }}` renders `-3`, and so
-    does a `-3.14` taken from the context. The cause is in the `gtmpl_value`
-    dependency and cannot be worked around from here; see
-    [#13](https://github.com/firstdorsal/gtmpl-rust/issues/13)
 -   the following functions have not been implemented:
-    -   `html`, `js`
--   `printf` is not yet fully stable, but should support all _sane_ input
+    -   `html`, `js`, `slice`
+-   a float verb on an integer is accepted where Go refuses it: `{{ printf "%f" 3 }}`
+    gives `3.000000` rather than Go's `%!f(int=3)`. A whole float is stored as an
+    integer so `{{ 3.0 }}` renders `3` the way Go does, which leaves the two
+    indistinguishable; refusing the float case would be the worse trade
+-   an integer literal above `i64` is accepted and printed where Go's parser refuses it
+-   rendered with no data at all, `{{ .field }}` is an error rather than Go's
+    `<no value>`
 -   declaring a variable from a large value (`{{ $top := . }}`) copies it; field reads
     through the variable do not
 
@@ -168,7 +171,7 @@ Enable `helm-functions` to get 152 Helm-compatible template functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.8"
+version = "0.9"
 features = ["helm-functions"]
 ```
 
@@ -191,7 +194,7 @@ Enable `mows-functions` to get 3 additional mows-specific functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.8"
+version = "0.9"
 features = ["mows-functions"]
 ```
 
@@ -206,7 +209,7 @@ Enable `all-functions` to get both Helm and mows functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.8"
+version = "0.9"
 features = ["all-functions"]
 ```
 
@@ -224,7 +227,7 @@ Enable `gtmpl_dynamic_template` in your `Cargo.toml`:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.8"
+version = "0.9"
 features = ["gtmpl_dynamic_template"]
 ```
 
@@ -268,15 +271,22 @@ The following syntax is used:
 
 ## Context
 
-We use [gtmpl_value]'s Value as internal data type. [gtmpl_derive] provides a
-handy `derive` macro to generate the `From` implementation for `Value`.
+[gtmpl_value_ng]'s `Value` is the internal data type, re-exported here as
+`gtmpl_ng::Value`. [gtmpl_derive_ng] provides the `derive` macro that generates the
+`From` implementation for it. Both live in this repository and are released with the
+engine.
 
 See:
 
--   [gtmpl_value at crates.io](https://crates.io/crate/gtmpl_value)
--   [gtmpl_value documentation](https://docs.rs/crate/gtmpl_value)
--   [gtmpl_derive at crates.io](https://crates.io/crate/gtmpl_derive)
--   [gtmpl_derive documentation](https://docs.rs/crate/gtmpl_derive)
+-   [gtmpl_value_ng at crates.io](https://crates.io/crates/gtmpl_value_ng)
+-   [gtmpl_value_ng documentation](https://docs.rs/crate/gtmpl_value_ng)
+-   [gtmpl_derive_ng at crates.io](https://crates.io/crates/gtmpl_derive_ng)
+-   [gtmpl_derive_ng documentation](https://docs.rs/crate/gtmpl_derive_ng)
+
+Coming from the published `gtmpl_value`/`gtmpl_derive`? `Into` is not transitive, so a
+value from the original derive will not satisfy a bound asking for the new type.
+Either switch the derive import, or enable the `gtmpl_value_compat` feature and
+convert with `Value::try_from`.
 
 ## Why do we need this?
 
@@ -297,5 +307,5 @@ it feels more native if tooling around them uses the same.
 [kubernetes]: https://kubernetes.io
 [helm]: https://github.com/kubernetes/helm/blob/master/docs/chart_best_practices/templates.md
 [docker]: https://docker.com
-[gtmpl_value]: https://github.com/fiji-flo/gtmpl_value
-[gtmpl_derive]: https://github.com/fiji-flo/gtmpl_derive
+[gtmpl_value_ng]: https://crates.io/crates/gtmpl_value_ng
+[gtmpl_derive_ng]: https://crates.io/crates/gtmpl_derive_ng

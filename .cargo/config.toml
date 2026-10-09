@@ -1,0 +1,5 @@
+# `cargo test` alone leaves the helm-function suites out -- see tests/feature_gates.rs,
+# which reports them as ignored rather than letting the run look complete. This is the
+# command CI uses.
+[alias]
+test-all = "test --workspace --all-features"

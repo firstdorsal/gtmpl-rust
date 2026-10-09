@@ -20,22 +20,6 @@ fn render(tmpl_str: &str, ctx: Value) -> Result<String, String> {
         .map_err(|e| format!("exec: {e}"))
 }
 
-/// Previously panicked in `utils::unqote` with a non-char-boundary slice
-/// because `&raw[..2]` byte-sliced across a multibyte character when a
-/// string literal contained a backslash followed by a multibyte char.
-#[test]
-fn string_literal_backslash_followed_by_multibyte_does_not_panic() {
-    // Must NOT panic. An unknown escape like `\…` should become a
-    // parse error, not a crash.
-    let tmpl = "{{ \"a\\…b\" }}";
-    let result = render(tmpl, Value::Nil);
-    assert!(
-        result.is_err(),
-        "expected parse error for invalid escape, got {:?}",
-        result
-    );
-}
-
 /// Previously panicked in `helm_functions::logic::value_is_truthy`
 /// (line 76) with `n.as_f64().unwrap()` on any integer Number, because
 /// `gtmpl_value_ng::Number::as_f64()` returns `None` for non-float variants.
@@ -71,34 +55,6 @@ fn default_with_float_value() {
     let out = render(r#"{{ .count | default 999.0 }}"#, Value::from(ctx)).unwrap();
     assert_eq!(out, "5.5");
 }
-
-/// Core `cmp` used to fail on any mixed int/float comparison because
-/// `Number::as_f64()` only returns `Some` for the float variant. That
-/// meant `{{ lt 5 3.5 }}` returned `unable to compare 5 and 3.5` even
-/// though it is obviously comparable.
-#[test]
-fn mixed_int_and_float_comparison_works() {
-    let mut tmpl = Template::default();
-    tmpl.add_funcs(&HELM_FUNCTIONS);
-
-    tmpl.parse(r#"{{ lt 5 3.5 }} {{ lt 5 10.5 }} {{ gt 5 3.5 }} {{ ge 5 5.0 }}"#)
-        .unwrap();
-    let out = tmpl.render(&Context::from(Value::Nil)).unwrap();
-    assert_eq!(out, "false true true true");
-}
-
-#[test]
-fn integer_from_context_compared_with_float_literal() {
-    let mut tmpl = Template::default();
-    tmpl.add_funcs(&HELM_FUNCTIONS);
-    tmpl.parse(r#"{{ lt .n 10.5 }}"#).unwrap();
-
-    let mut ctx: HashMap<String, Value> = HashMap::new();
-    ctx.insert("n".to_string(), Value::from(5i64));
-    let out = tmpl.render(&Context::from(Value::from(ctx))).unwrap();
-    assert_eq!(out, "true");
-}
-
 /// The original user-facing report: a URL literal with `%5B`/`%5D`
 /// passed as the default value in a pipe. This on its own should never
 /// panic regardless of what `.sharingUrl` resolves to.

@@ -391,9 +391,6 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         if chain.field.is_empty() {
             return Err(ExecError::NoFieldsInEvalChainNode);
         }
-        if let Nodes::Nil(_) = *chain.node {
-            return Err(ExecError::NullInChain(Box::new(chain.clone())));
-        }
         let pipe = self.eval_arg(ctx, &*chain.node)?;
         self.eval_field_chain(&pipe, &chain.field, args, fin)
     }

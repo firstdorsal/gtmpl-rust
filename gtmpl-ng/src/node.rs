@@ -153,7 +153,7 @@ pub trait Node: Display {
 
 macro_rules! node {
     ($name:ident {
-        $($field:ident : $typ:ty),* $(,)*
+        $($(#[$field_meta:meta])* $field:ident : $typ:ty),* $(,)*
     }) => {
         #[derive(Clone)]
         #[derive(Debug)]
@@ -164,7 +164,7 @@ macro_rules! node {
             col: usize,
             len: usize,
             tr: TreeId,
-            $(pub $field: $typ,)*
+            $($(#[$field_meta])* pub $field: $typ,)*
         }
         impl Node for $name {
             fn typ(&self) -> &NodeType {
@@ -190,6 +190,17 @@ macro_rules! node {
 }
 
 impl Nodes {
+    /// The offset just past this node's source text.
+    ///
+    /// For most nodes that is `pos() + len()`. A branch is the exception: its length
+    /// is only its pipeline's span, while its text runs through its `{{end}}`.
+    pub fn extent(&self) -> Pos {
+        match *self {
+            Nodes::If(ref n) | Nodes::Range(ref n) | Nodes::With(ref n) => n.body_end,
+            _ => self.pos() + self.len(),
+        }
+    }
+
     pub fn is_empty_tree(&self) -> Result<bool, NodeError> {
         match *self {
             Nodes::List(ref n) => n.is_empty_tree(),
@@ -993,7 +1004,15 @@ node!(
     BranchNode {
         pipe: PipeNode,
         list: ListNode,
-        else_list: Option<ListNode>
+        else_list: Option<ListNode>,
+        /// The offset just past this branch's `{{end}}`.
+        ///
+        /// A branch's own `len` is only its pipeline's span, so that an error in
+        /// `{{if .x}}` is reported against `.x` rather than against the whole
+        /// construct. That makes `pos + len` the wrong answer for "where does this
+        /// node's text stop", which is what an enclosing list needs, so the real
+        /// extent is kept separately.
+        body_end: Pos
     }
 );
 
@@ -1007,6 +1026,7 @@ impl BranchNode {
         pipe: PipeNode,
         list: ListNode,
         else_list: Option<ListNode>,
+        body_end: Pos,
     ) -> IfNode {
         IfNode {
             typ: NodeType::If,
@@ -1018,6 +1038,7 @@ impl BranchNode {
             pipe,
             list,
             else_list,
+            body_end,
         }
     }
 
@@ -1026,6 +1047,7 @@ impl BranchNode {
         pipe: PipeNode,
         list: ListNode,
         else_list: Option<ListNode>,
+        body_end: Pos,
     ) -> WithNode {
         WithNode {
             typ: NodeType::With,
@@ -1037,6 +1059,7 @@ impl BranchNode {
             pipe,
             list,
             else_list,
+            body_end,
         }
     }
 
@@ -1045,6 +1068,7 @@ impl BranchNode {
         pipe: PipeNode,
         list: ListNode,
         else_list: Option<ListNode>,
+        body_end: Pos,
     ) -> RangeNode {
         RangeNode {
             typ: NodeType::Range,
@@ -1056,6 +1080,7 @@ impl BranchNode {
             pipe,
             list,
             else_list,
+            body_end,
         }
     }
 }

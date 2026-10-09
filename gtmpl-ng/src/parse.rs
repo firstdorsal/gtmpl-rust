@@ -18,8 +18,10 @@ fn span_from_to(start: Pos, end: Pos) -> usize {
 /// appending is done.
 fn finish_list(list: ListNode) -> ListNode {
     match list.nodes.last() {
+        // A branch's own length stops at its pipeline, so its extent -- which runs
+        // through its `{{end}}` -- is what the list has to measure against.
         Some(last) => {
-            let end = last.pos() + last.len();
+            let end = last.extent();
             list.finish(end)
         }
         None => list,
@@ -448,7 +450,7 @@ impl Parser {
         &mut self,
         allow_else_if: bool,
         context: &str,
-    ) -> Result<(NodeSpan, PipeNode, ListNode, Option<ListNode>), ParseError> {
+    ) -> Result<(NodeSpan, PipeNode, ListNode, Option<ListNode>, Pos), ParseError> {
         let vars_len = self
             .tree
             .as_ref()
@@ -465,6 +467,8 @@ impl Parser {
             pipe.len(),
         );
         let (list, next) = self.item_list()?;
+        // Where this construct's text stops: just past the `{{end}}` that closed it.
+        let mut body_end = next.extent();
         let else_list = match *next.typ() {
             NodeType::End => None,
             NodeType::Else => {
@@ -478,12 +482,17 @@ impl Parser {
                         next.len(),
                     );
                     else_list.append(self.if_control()?);
-                    Some(finish_list(else_list))
+                    let else_list = finish_list(else_list);
+                    // `else if` shares the enclosing `{{end}}`, which the nested `if`
+                    // consumed, so the body runs to wherever that one ended.
+                    body_end = else_list.pos() + else_list.len();
+                    Some(else_list)
                 } else {
                     let (else_list, next) = self.item_list()?;
                     if *next.typ() != NodeType::End {
                         return self.error(&format!("expected end; found {}", next));
                     }
+                    body_end = next.extent();
                     Some(else_list)
                 }
             }
@@ -492,24 +501,28 @@ impl Parser {
         if let Some(t) = self.tree.as_mut() {
             t.pop_vars(vars_len);
         }
-        Ok((span, pipe, list, else_list))
+        Ok((span, pipe, list, else_list, body_end))
     }
 
     fn if_control(&mut self) -> Result<Nodes, ParseError> {
-        let (span, pipe, list, else_list) = self.parse_control(true, "if")?;
-        Ok(Nodes::If(IfNode::new_if(span, pipe, list, else_list)))
+        let (span, pipe, list, else_list, body_end) = self.parse_control(true, "if")?;
+        Ok(Nodes::If(IfNode::new_if(
+            span, pipe, list, else_list, body_end,
+        )))
     }
 
     fn range_control(&mut self) -> Result<Nodes, ParseError> {
-        let (span, pipe, list, else_list) = self.parse_control(false, "range")?;
+        let (span, pipe, list, else_list, body_end) = self.parse_control(false, "range")?;
         Ok(Nodes::Range(RangeNode::new_range(
-            span, pipe, list, else_list,
+            span, pipe, list, else_list, body_end,
         )))
     }
 
     fn with_control(&mut self) -> Result<Nodes, ParseError> {
-        let (span, pipe, list, else_list) = self.parse_control(false, "with")?;
-        Ok(Nodes::With(WithNode::new_with(span, pipe, list, else_list)))
+        let (span, pipe, list, else_list, body_end) = self.parse_control(false, "with")?;
+        Ok(Nodes::With(WithNode::new_with(
+            span, pipe, list, else_list, body_end,
+        )))
     }
 
     fn end_control(&mut self) -> Result<Nodes, ParseError> {
@@ -777,7 +790,7 @@ impl Parser {
             return self.error("empty command");
         }
         if let Some(last) = cmd.args.last() {
-            let end = last.pos() + last.len();
+            let end = last.extent();
             cmd = cmd.finish(end);
         }
         Ok(cmd)
@@ -1215,6 +1228,88 @@ mod tests_mocked {
             assert_eq!(n.value, Value::from(false));
         } else {
             panic!()
+        }
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+
+    fn root_span(source: &str) -> (Pos, usize) {
+        let trees = parse("t".to_owned(), source.to_owned(), HashSet::new())
+            .unwrap_or_else(|e| panic!("{:?} should parse: {}", source, e));
+        let root = trees["t"]
+            .root
+            .as_ref()
+            .unwrap_or_else(|| panic!("{:?} has no root", source));
+        (root.pos(), root.len())
+    }
+
+    /// A list's extent used to stop at its last child's reported span, which for a
+    /// branch is only its pipeline -- so the root list of `{{if .cond}}x{{end}}`
+    /// claimed to be ten bytes of a twenty-byte template.
+    #[test]
+    fn a_list_spans_through_its_last_branchs_end() {
+        for source in [
+            "{{if .cond}}x{{end}}",
+            "{{range .items}}x{{end}}",
+            "{{with .thing}}x{{end}}",
+            "{{if .a}}x{{else}}y{{end}}",
+            "{{if .a}}x{{else if .b}}y{{end}}",
+            "{{if .a}}x{{else if .b}}y{{else}}z{{end}}",
+            "{{if .a}}{{if .b}}x{{end}}{{end}}",
+            "text {{if .a}}x{{end}}",
+        ] {
+            let (pos, len) = root_span(source);
+            assert_eq!(pos, 0, "{:?} starts at zero", source);
+            assert_eq!(
+                pos + len,
+                source.len(),
+                "{:?} should span all {} bytes, got {}",
+                source,
+                source.len(),
+                len
+            );
+        }
+    }
+
+    /// The invariant itself: a list ends where its last child ends. That is not
+    /// always the end of the source -- an action's span is its pipeline, so the
+    /// trailing ` }}` stays outside it, which is deliberate and unchanged.
+    #[test]
+    fn a_list_ends_where_its_last_child_ends() {
+        for source in [
+            "{{if .a}}x{{end}} tail",
+            "{{ .a }}",
+            "plain text",
+            "{{ .a }} and {{ .b }}",
+            "{{if .a}}x{{end}}{{ .b }}",
+        ] {
+            let trees = parse("t".to_owned(), source.to_owned(), HashSet::new()).unwrap();
+            let root = trees["t"].root.as_ref().unwrap();
+            let Nodes::List(ref list) = *root else {
+                panic!("the root of {:?} is not a list", source)
+            };
+            let last = list
+                .nodes
+                .last()
+                .expect("a non-empty template has children");
+            assert_eq!(
+                root.pos() + root.len(),
+                last.extent(),
+                "{:?} should end where its last child does",
+                source
+            );
+        }
+    }
+
+    /// Text after the branch does carry the list to the end of the source.
+    #[test]
+    fn a_trailing_text_node_carries_the_list_to_the_end() {
+        for source in ["{{if .a}}x{{end}} tail", "plain text", "{{ .a }} tail"] {
+            let (pos, len) = root_span(source);
+            assert_eq!(pos + len, source.len(), "{:?}", source);
         }
     }
 }

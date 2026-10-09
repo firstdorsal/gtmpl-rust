@@ -1,4 +1,4 @@
-use crate::node::{ChainNode, CommandNode, Nodes, PipeNode};
+use crate::node::{CommandNode, Nodes, PipeNode};
 use gtmpl_value_ng::{FuncError, Value};
 use std::{fmt, string::FromUtf8Error};
 use thiserror::Error;
@@ -188,8 +188,6 @@ pub enum ExecError {
     NotAFunctionButArguments(String),
     #[error("no fields in eval_chain_node")]
     NoFieldsInEvalChainNode,
-    #[error("indirection through explicit nul in {0}")]
-    NullInChain(Box<ChainNode>),
     #[error("cannot handle {0} as argument")]
     InvalidArgument(Box<Nodes>),
     #[error("{0} is not a defined function")]

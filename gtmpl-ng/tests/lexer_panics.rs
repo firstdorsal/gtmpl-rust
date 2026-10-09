@@ -91,3 +91,16 @@ fn legal_non_ascii_templates_still_render() {
         );
     }
 }
+
+/// Previously panicked slicing inside a multi-byte character's encoding: an unknown
+/// escape like `\…` must be a clean parse error. Moved here from the gated panic
+/// suite, which it never needed -- the template calls no function at all.
+#[test]
+fn an_unknown_escape_before_a_multibyte_character_does_not_panic() {
+    let result = parse_and_render("{{ \"a\\…b\" }}");
+    assert!(
+        result.is_err(),
+        "expected a parse error for the invalid escape, got {:?}",
+        result
+    );
+}

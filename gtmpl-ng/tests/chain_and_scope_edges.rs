@@ -95,3 +95,42 @@ fn boxed_error_variants_keep_their_messages() {
         assert!(!reason(&message).is_empty());
     }
 }
+
+/// `ExecError::NullInChain` used to guard against a chain whose base node is `nil`.
+/// `ChainNode` has one producer, and it rejects a `nil` base with "unexpected . after
+/// term nil" before building one, so the branch could not be reached; these are the
+/// shapes that look like they would, each erroring somewhere else. The variant is
+/// gone, and this records why.
+#[test]
+fn a_nil_base_never_reaches_a_chain() {
+    for (source, expected) in [
+        ("{{ nil.foo }}", "unexpected . after term nil"),
+        ("{{ nil.foo.bar }}", "unexpected . after term nil"),
+        ("{{ (nil).foo }}", "cannot evaluate command: nil"),
+        (
+            "{{ $x := nil }}{{ $x.foo }}",
+            "cannot evaluate command: nil",
+        ),
+        ("{{ if (nil).a }}x{{ end }}", "cannot evaluate command: nil"),
+        (
+            "{{ (printf \"%v\" nil).foo }}",
+            "only maps and objects have fields",
+        ),
+    ] {
+        let mut template = Template::default();
+        let error = match template.parse(source) {
+            Err(error) => error.to_string(),
+            Ok(()) => template
+                .render(&Context::from(Value::Nil))
+                .expect_err(&format!("{:?} should not render", source))
+                .to_string(),
+        };
+        assert!(
+            error.contains(expected),
+            "{:?} should mention {:?}, said {:?}",
+            source,
+            expected,
+            error
+        );
+    }
+}
