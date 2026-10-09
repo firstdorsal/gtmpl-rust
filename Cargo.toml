@@ -1,75 +1,22 @@
-[package]
-name = "gtmpl-ng"
-version = "0.8.0"
-authors = ["Florian Dieminger <me@fiji-flo.de>", "Paul Colin Hennig <8d_fvfmaa-o2wf_79aqig6g2ki6-09ffkeqmyo3d@vindelicum.eu>"]
-description = "The Golang Templating Language for Rust (fork with line number fix and Helm functions)"
+[workspace]
+members = ["gtmpl-ng", "gtmpl_value_ng", "gtmpl_derive_ng"]
+resolver = "2"
+
+# The three crates are released together under one version, so a tag means the same
+# thing for all of them and `gtmpl-ng` never depends on a value type older than itself.
+[workspace.package]
+version = "0.9.0"
+authors = [
+    "Florian Dieminger <me@fiji-flo.de>",
+    "Paul Colin Hennig <8d_fvfmaa-o2wf_79aqig6g2ki6-09ffkeqmyo3d@vindelicum.eu>",
+]
 license = "MIT"
 repository = "https://github.com/firstdorsal/gtmpl-rust"
-documentation = "https://docs.rs/crate/gtmpl-ng"
-keywords = ["golang", "template", "templating", "helm"]
-categories = ["template-engine"]
-readme = "README.md"
-include = ["Cargo.toml", "src/**/*.rs", "tests/**/*.rs", "benches/**/*.rs", "README.md", "LICENSE"]
-edition = "2018"
+edition = "2021"
 
-[badges]
-maintenance = { status = "actively-developed" }
-
-[features]
-gtmpl_dynamic_template = []
-helm-functions = [
-    "dep:sha1",
-    "dep:sha2",
-    "dep:md5",
-    "dep:bcrypt",
-    "dep:rand",
-    "dep:rcgen",
-    "dep:time",
-    "dep:data-encoding",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:serde_yaml",
-    "dep:regex",
-    "dep:uuid",
-    "dep:x509-parser",
-    "dep:pem",
-]
-mows-functions = [
-    "dep:sha1",
-    "dep:sha2",
-    "dep:md5",
-    "dep:rand",
-]
-all-functions = ["helm-functions", "mows-functions"]
-
-[dependencies]
-lazy_static = "1"
-percent-encoding = "2"
-gtmpl_value = "0.5"
+[workspace.dependencies]
+gtmpl_value_ng = { version = "0.9.0", path = "gtmpl_value_ng" }
+gtmpl_derive_ng = { version = "0.9.0", path = "gtmpl_derive_ng" }
 anyhow = "1"
 thiserror = "1"
-
-# Optional dependencies for helm-functions
-sha1 = { version = "0.10", optional = true }
-sha2 = { version = "0.10", optional = true }
-md5 = { version = "0.7", optional = true }
-bcrypt = { version = "0.15", optional = true }
-rand = { version = "0.9", optional = true }
-rcgen = { version = "0.13", optional = true }
-time = { version = "0.3", optional = true }
-data-encoding = { version = "2.6", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
-serde_yaml = { version = "0.9", optional = true }
-regex = { version = "1", optional = true }
-uuid = { version = "1", features = ["v4"], optional = true }
-x509-parser = { version = "0.16", optional = true }
-pem = { version = "3", optional = true }
-
-[dev-dependencies]
-criterion = "0.8"
-gtmpl_derive = "0.5"
-
-[[bench]]
-name = "render_fields"
-harness = false
+serde = { version = "1", features = ["derive"] }

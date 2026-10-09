@@ -1,0 +1,28 @@
+[package]
+name = "gtmpl_value_ng"
+description = "Internal value format for gtmpl-ng, the Golang templating language for Rust"
+documentation = "https://docs.rs/crate/gtmpl_value_ng"
+keywords = ["gtmpl-ng", "gtmpl", "golang", "template", "templating"]
+categories = ["template-engine"]
+readme = "README.md"
+include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE"]
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[features]
+# Conversions from the published `gtmpl_value` 0.5 types, for migrating a tree that
+# still uses the original derive macro. Off by default: it pulls in that crate.
+gtmpl_value_compat = ["dep:gtmpl_value"]
+serde = ["dep:serde"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+gtmpl_value = { version = "0.5", optional = true }

@@ -1,0 +1,28 @@
+[package]
+name = "gtmpl_derive_ng"
+description = "Derive macro for gtmpl_value_ng"
+documentation = "https://docs.rs/crate/gtmpl_derive_ng"
+keywords = ["gtmpl-ng", "gtmpl_value_ng", "gtmpl", "derive", "template"]
+readme = "README.md"
+include = ["Cargo.toml", "src/**/*.rs", "README.md", "LICENSE"]
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "3"
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+gtmpl_value_ng = { workspace = true }
+anyhow.workspace = true
+trybuild = "1"

@@ -1,0 +1,79 @@
+[package]
+name = "gtmpl-ng"
+description = "The Golang Templating Language for Rust (fork with line number fix and Helm functions)"
+documentation = "https://docs.rs/crate/gtmpl-ng"
+keywords = ["golang", "template", "templating", "helm"]
+categories = ["template-engine"]
+readme = "README.md"
+include = ["Cargo.toml", "src/**/*.rs", "tests/**/*.rs", "benches/**/*.rs", "README.md", "LICENSE"]
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[features]
+gtmpl_dynamic_template = []
+# Re-exported from `gtmpl_value_ng`: conversions from the published `gtmpl_value` 0.5
+# types, for migrating a tree that still uses the original derive macro.
+gtmpl_value_compat = ["gtmpl_value_ng/gtmpl_value_compat"]
+helm-functions = [
+    "dep:sha1",
+    "dep:sha2",
+    "dep:md5",
+    "dep:bcrypt",
+    "dep:rand",
+    "dep:rcgen",
+    "dep:time",
+    "dep:data-encoding",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:serde_yaml_neo",
+    "dep:regex",
+    "dep:uuid",
+    "dep:x509-parser",
+    "dep:pem",
+]
+mows-functions = [
+    "dep:sha1",
+    "dep:sha2",
+    "dep:md5",
+    "dep:rand",
+]
+all-functions = ["helm-functions", "mows-functions"]
+
+[dependencies]
+lazy_static = "1"
+percent-encoding = "2"
+gtmpl_value_ng = { workspace = true }
+anyhow.workspace = true
+thiserror.workspace = true
+hexf-parse = "0.2"
+
+# Optional dependencies for helm-functions
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
+md5 = { version = "0.7", optional = true }
+bcrypt = { version = "0.15", optional = true }
+rand = { version = "0.9", optional = true }
+rcgen = { version = "0.13", optional = true }
+time = { version = "0.3", optional = true }
+data-encoding = { version = "2.6", optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { version = "1", optional = true }
+serde_yaml_neo = { version = "0.11", optional = true }
+regex = { version = "1", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+x509-parser = { version = "0.16", optional = true }
+pem = { version = "3", optional = true }
+
+[dev-dependencies]
+criterion = "0.8"
+gtmpl_derive_ng = { workspace = true }
+
+[[bench]]
+name = "render_fields"
+harness = false
