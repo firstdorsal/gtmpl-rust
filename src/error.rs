@@ -168,8 +168,6 @@ pub enum ExecError {
     Utf8ConversionFailed(FromUtf8Error),
     #[error("empty var stack")]
     EmptyStack,
-    #[error("var context smaller than {0}")]
-    VarContextToSmall(usize),
     #[error("invalid range {0:?}")]
     InvalidRange(Value),
     #[error("pipeline must yield a String")]
