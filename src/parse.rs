@@ -360,9 +360,10 @@ impl Parser {
         let pos = token.pos;
         let line = token.line;
         let col = token.col;
-        let len = token.val.len();
         self.backup(token);
         let pipe = self.pipeline("command")?;
+        // The action spans its pipeline; both start at the same token.
+        let len = (pipe.pos() + pipe.len()).saturating_sub(pos);
         Ok(Nodes::Action(ActionNode::new(
             self.tree_id,
             pos,
@@ -633,6 +634,12 @@ impl Parser {
             match token.typ {
                 ItemType::ItemRightDelim | ItemType::ItemRightParen => {
                     self.check_pipeline(&mut pipe, context)?;
+                    // Span to the end of the last command, so the delimiter and any
+                    // trailing space stay out of it. `check_pipeline` has already
+                    // rejected an empty pipeline.
+                    if let Some(last) = pipe.cmds.last() {
+                        pipe.set_len((last.pos() + last.len()).saturating_sub(pipe.pos()));
+                    }
                     if token.typ == ItemType::ItemRightParen {
                         self.backup(token);
                     }
@@ -713,6 +720,9 @@ impl Parser {
         if cmd.args.is_empty() {
             return self.error("empty command");
         }
+        if let Some(last) = cmd.args.last() {
+            cmd.set_len((last.pos() + last.len()).saturating_sub(cmd.pos()));
+        }
         Ok(cmd)
     }
 
@@ -743,6 +753,10 @@ impl Parser {
                         next.val.len(),
                         n,
                     );
+                    // Track the end of the last field token. The span cannot be taken
+                    // from `to_string()`: a node does not re-render to the source it was
+                    // parsed from, and `FieldNode` in particular drops the leading dot.
+                    let mut chain_end = next.pos + next.val.len();
                     chain.add(&next.val);
                     while self
                         .peek()
@@ -750,14 +764,15 @@ impl Parser {
                         .unwrap_or(false)
                     {
                         let field = self.next().unwrap();
+                        chain_end = field.pos + field.val.len();
                         chain.add(&field.val);
                     }
                     let chain_str = chain.to_string();
-                    // Use original node's position and full expression length
                     let orig_line = chain.node.line();
                     let orig_col = chain.node.col();
                     let orig_pos = chain.node.pos();
-                    let full_len = chain_str.len();
+                    let full_len = chain_end.saturating_sub(orig_pos);
+                    chain.set_len(full_len);
                     let n = match typ {
                         NodeType::Field => Nodes::Field(FieldNode::new(
                             self.tree_id,
