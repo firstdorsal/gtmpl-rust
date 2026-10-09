@@ -99,14 +99,17 @@ fn function_fields_are_invoked_through_variable_chains() {
     );
 }
 
-/// A map miss on the last element of the chain renders as `<no value>`, through a
-/// variable exactly as through dot.
+/// A map miss renders as `<no value>` and ends the chain, through a variable exactly
+/// as through dot. `tests/missing_map_key.rs` has the full comparison against Go.
 #[test]
-fn missing_final_map_key_yields_no_value() {
+fn missing_map_key_yields_no_value() {
     for source in [
         "{{.empty.missing}}",
         "{{$.empty.missing}}",
         "{{$d := .}}{{$d.empty.missing}}",
+        "{{.empty.missing.deeper}}",
+        "{{$.empty.missing.deeper}}",
+        "{{$d := .}}{{$d.empty.missing.deeper}}",
     ] {
         assert_eq!(render(source).as_deref(), Ok("<no value>"), "{}", source);
     }
@@ -123,13 +126,8 @@ fn reason(error: &str) -> &str {
 /// The failure modes have to stay identical between dot- and variable-rooted chains.
 #[test]
 fn failures_agree_between_dot_and_variable_chains() {
-    // map miss in the middle of a chain, missing struct field, and a scalar receiver
+    // a missing struct field, and a receiver that is not a map or object
     for (dot, dollar, var) in [
-        (
-            "{{.empty.missing.deeper}}",
-            "{{$.empty.missing.deeper}}",
-            "{{$d.empty.missing.deeper}}",
-        ),
         (
             "{{.object.nope}}",
             "{{$.object.nope}}",

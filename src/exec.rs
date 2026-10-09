@@ -33,20 +33,22 @@ fn lookup_field_chain<'v>(
     receiver: &'v Value,
     ident: &[String],
 ) -> Result<ChainLookup<'v>, ExecError> {
-    let n = ident.len();
     let mut value = receiver;
 
-    for (index, field_name) in ident.iter().enumerate() {
+    for field_name in ident {
         let field = match value {
             Value::Object(object) => match object.get(field_name) {
                 Some(field) => field,
                 None => return Err(ExecError::NoFieldFor(field_name.to_string(), value.clone())),
             },
+            // A missing key ends the chain: Go yields an invalid value here and
+            // every further field access on it stays invalid, however deep.
             Value::Map(map) => match map.get(field_name) {
                 Some(field) => field,
-                None if index + 1 == n => return Ok(ChainLookup::NoValue),
-                None => return Err(ExecError::OnlyMapsAndObjectsHaveFields),
+                None => return Ok(ChainLookup::NoValue),
             },
+            // Reached when a missed lookup was carried here through a variable.
+            Value::NoValue => return Ok(ChainLookup::NoValue),
             _ => return Err(ExecError::OnlyMapsAndObjectsHaveFields),
         };
 
@@ -418,6 +420,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                 .cloned()
                 .ok_or_else(|| ExecError::NoFieldFor(field_name.to_string(), receiver.clone())),
             Value::Map(ref o) => Ok(o.get(field_name).cloned().unwrap_or(Value::NoValue)),
+            Value::NoValue => Ok(Value::NoValue),
             _ => Err(ExecError::OnlyMapsAndObjectsHaveFields),
         };
         if let Ok(Value::Function(ref f)) = ret {
