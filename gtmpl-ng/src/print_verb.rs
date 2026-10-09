@@ -1,348 +1,341 @@
-use std::char;
-use std::fmt;
+//! Formatting one argument for one verb, the way Go's `fmt` does it.
+//!
+//! Go never fails on a verb. When one does not apply to its argument it writes a
+//! `%!verb(type=value)` marker into the output and carries on, so nothing here returns
+//! a `Result` either.
+//!
+//! The flag and width rules are Go's, which differ from Rust's in ways that are easy
+//! to get wrong: zero padding goes between the sign and the digits, `%#o` writes a
+//! bare `0` rather than Rust's `0o`, a string pads on the left by default where Rust
+//! pads on the right, and an explicit precision makes Go ignore the zero flag.
 
-use crate::error::PrintError;
-use crate::printf::{params_to_chars, FormatParams};
+use std::fmt::Write;
 
-use gtmpl_value_ng::Value;
+use crate::printf::FormatParams;
 
-/// Go's `%f`, `%e` and `%E` default to six digits after the point when no precision
-/// is given; Rust's `Display`/`LowerExp` default to the shortest representation.
-fn with_default_precision(p: &FormatParams, precision: usize) -> FormatParams {
-    FormatParams {
-        precision: p.precision.or(Some(precision)),
-        ..*p
-    }
-}
+use gtmpl_value_ng::{format_float, FloatFormat, NumberKind, Value};
 
-/// Print a verb like golang's printf.
-pub fn print(p: &FormatParams, typ: char, val: &Value) -> Result<String, PrintError> {
+/// Formats one argument for one verb.
+pub fn print(p: &FormatParams, verb: char, val: &Value) -> String {
     match *val {
-        Value::Number(ref n) if n.as_u64().is_some() => {
-            let u = n.as_u64().unwrap();
-            Ok(match typ {
-                'b' => printf_b(p, u),
-                'd' | 'v' => printf_generic(p, u),
-                'o' => printf_o(p, u),
-                'c' => {
-                    let c = char::from_u32(u as u32).ok_or(PrintError::NotAValidChar(u as i128))?;
-                    printf_generic(p, c)
-                }
-                'q' => {
-                    let c = char::from_u32(u as u32).ok_or(PrintError::NotAValidChar(u as i128))?;
-                    printf_generic(p, format!("'{}'", escape_char(c)))
-                }
-                'x' => printf_x(p, u),
-                'X' => printf_xx(p, u),
-                'U' => printf_generic(p, format!("U+{:X}", u)),
-                // `gtmpl_value_ng` stores a whole float as an integer, so a float verb
-                // has to work here too -- otherwise `%f` would format 3.5 and refuse
-                // 3.0. Go can tell the two apart and rejects the verb on a true
-                // integer; we cannot, and failing the float case is the worse trade.
-                'f' | 'F' => printf_generic(&with_default_precision(p, 6), u as f64),
-                'e' => printf_e(&with_default_precision(p, 6), u as f64),
-                'E' => printf_ee(&with_default_precision(p, 6), u as f64),
-                _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
-            })
+        Value::Number(ref n) => match n.kind() {
+            NumberKind::Unsigned(u) => integer(p, verb, i128::from(u), val),
+            NumberKind::Signed(i) => integer(p, verb, i128::from(i), val),
+            NumberKind::Float(f) => match verb {
+                'e' => float(p, f, FloatFormat::Exponent),
+                'E' => float(p, f, FloatFormat::ExponentUpper),
+                'f' | 'F' => float(p, f, FloatFormat::Fixed),
+                'v' | 'g' => float(p, f, FloatFormat::General),
+                'G' => float(p, f, FloatFormat::GeneralUpper),
+                _ => bad_verb(p, verb, val),
+            },
+        },
+        // An absent or a nil value has no representation of its own, so `%v` renders it
+        // the way Go's formatter does and every other verb gets the marker.
+        Value::Nil | Value::NoValue => match verb {
+            'v' => pad_text(p, "<nil>"),
+            _ => bad_verb(p, verb, val),
+        },
+        Value::Bool(b) => match verb {
+            'v' | 't' => pad_text(p, if b { "true" } else { "false" }),
+            _ => bad_verb(p, verb, val),
+        },
+        Value::String(ref s) => match verb {
+            's' | 'v' => pad_text(p, s),
+            'x' => pad_text(p, &hex_bytes(p, s, false)),
+            'X' => pad_text(p, &hex_bytes(p, s, true)),
+            'q' => pad_text(p, &quote_string(p, s)),
+            _ => bad_verb(p, verb, val),
+        },
+        // Go applies the verb to each element rather than to the container, so a verb
+        // that does not fit marks the offending element: `[1 %!d(string=a)]`.
+        Value::Array(ref items) => {
+            let rendered: Vec<String> = items
+                .iter()
+                .map(|item| print(&FormatParams::default(), verb, item))
+                .collect();
+            pad_text(p, &format!("[{}]", rendered.join(" ")))
         }
-        Value::Number(ref n) if n.as_i64().is_some() => {
-            let i = n.as_i64().unwrap();
-            Ok(match typ {
-                'b' => printf_b(p, i),
-                'd' | 'v' => printf_generic(p, i),
-                'o' => printf_o(p, i),
-                'c' => {
-                    let c = char::from_u32(i as u32).ok_or(PrintError::NotAValidChar(i as i128))?;
-                    printf_generic(p, c)
-                }
-                'q' => {
-                    let c = char::from_u32(i as u32).ok_or(PrintError::NotAValidChar(i as i128))?;
-                    printf_generic(p, format!("'{}'", escape_char(c)))
-                }
-                'x' => printf_x(p, i),
-                'X' => printf_xx(p, i),
-                'U' => printf_generic(p, format!("U+{:X}", i)),
-                'f' | 'F' => printf_generic(&with_default_precision(p, 6), i as f64),
-                'e' => printf_e(&with_default_precision(p, 6), i as f64),
-                'E' => printf_ee(&with_default_precision(p, 6), i as f64),
-                _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
-            })
+        Value::Map(ref entries) | Value::Object(ref entries) => {
+            // Go has sorted map keys since 1.12, so the same data prints the same way
+            // twice.
+            let mut keys: Vec<&String> = entries.keys().collect();
+            keys.sort();
+            let rendered: Vec<String> = keys
+                .into_iter()
+                .map(|key| {
+                    let plain = FormatParams::default();
+                    format!(
+                        "{}:{}",
+                        print(&plain, verb, &Value::String(key.clone())),
+                        print(&plain, verb, &entries[key])
+                    )
+                })
+                .collect();
+            pad_text(p, &format!("map[{}]", rendered.join(" ")))
         }
-        Value::Number(ref n) if n.as_f64().is_some() => {
-            let f = n.as_f64().unwrap();
-            Ok(match typ {
-                'e' => printf_e(&with_default_precision(p, 6), f),
-                'E' => printf_ee(&with_default_precision(p, 6), f),
-                'f' | 'F' => printf_generic(&with_default_precision(p, 6), f),
-                // `%v` on a float is the shortest form that round-trips, which is
-                // what `Display` already gives: `3.14` stays `3.14` and `3.0`
-                // prints as `3`.
-                'v' | 'g' => printf_generic(p, f),
-                _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
-            })
-        }
-        // An absent or nil value has no representation of its own, so `%v` renders it
-        // the way Go's formatter does. Other verbs would need Go's `%!verb(value)`
-        // notation, which this formatter has no concept of.
-        Value::Nil | Value::NoValue => Ok(match typ {
-            'v' => printf_generic(p, "<nil>"),
-            _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
-        }),
-        Value::Bool(ref b) => Ok(match typ {
-            'v' | 't' => printf_generic(p, b),
-            _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
-        }),
-        Value::String(ref s) => Ok(match typ {
-            's' | 'v' => printf_generic(p, s),
-            'x' => printf_x(p, Hexer::from(s.as_str())),
-            'X' => printf_xx(p, Hexer::from(s.as_str())),
-            'q' => {
-                let s = s
-                    .chars()
-                    .map(|c| c.escape_default().to_string())
-                    .collect::<String>();
-                printf_generic(p, s)
-            }
-            _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
-        }),
-        Value::Array(ref a) => Ok(match typ {
-            'v' => {
-                let values: Vec<String> = a.iter().map(|v| printf_generic(p, v)).collect();
-                let res = format!("[{}]", values.join(" "));
-                printf_generic(p, res)
-            }
-            _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
-        }),
-        Value::Map(ref m) => Ok(match typ {
-            'v' => {
-                let values: Vec<String> = m
-                    .iter()
-                    .map(|(k, v)| {
-                        let v_str = printf_generic(p, v);
-                        format!("{}:{}", k, v_str)
-                    })
-                    .collect();
-                let res = format!("map[{}]", values.join(" "));
-                printf_generic(p, res)
-            }
-            _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
-        }),
-        _ => Err(PrintError::UnableToFormat(val.clone(), typ)),
+        Value::Function(_) => match verb {
+            'v' => pad_text(p, &val.to_string()),
+            _ => bad_verb(p, verb, val),
+        },
     }
 }
 
-fn printf_b<B: fmt::Binary>(p: &FormatParams, u: B) -> String {
-    match params_to_chars(p) {
-        ('#', '_', '+', '_', _) => format!("{:+#width$b}", u, width = p.width),
-        ('_', '_', '+', '_', _) => format!("{:+width$b}", u, width = p.width),
-        ('#', '_', '_', '_', _) => format!("{:#width$b}", u, width = p.width),
-        ('#', '0', '+', '_', _) => format!("{:+#0width$b}", u, width = p.width),
-        ('_', '0', '+', '_', _) => format!("{:+0width$b}", u, width = p.width),
-        ('#', '0', '_', '_', _) => format!("{:#0width$b}", u, width = p.width),
-        ('#', '_', '+', '-', _) => format!("{:<+#width$b}", u, width = p.width),
-        ('_', '_', '+', '-', _) => format!("{:<+width$b}", u, width = p.width),
-        ('#', '_', '_', '-', _) => format!("{:<#width$b}", u, width = p.width),
-        ('#', '0', '+', '-', _) => format!("{:<+#0width$b}", u, width = p.width),
-        ('_', '0', '+', '-', _) => format!("{:<+0width$b}", u, width = p.width),
-        ('#', '0', '_', '-', _) => format!("{:<#0width$b}", u, width = p.width),
-        (_, _, _, _, _) => format!("{:width$b}", u, width = p.width),
+/// Go's marker for a verb that does not apply: `%!d(string=x)`, or `%!d(<nil>)` for a
+/// value with no type to name.
+///
+/// The value inside the marker is rendered with `%v` and the same flags, which is why
+/// `%5d` of a boolean gives `%!d(bool= true)`.
+pub fn bad_verb(p: &FormatParams, verb: char, val: &Value) -> String {
+    match type_name(val) {
+        Some(name) => format!("%!{}({}={})", verb, name, print(p, 'v', val)),
+        None => format!("%!{}(<nil>)", verb),
     }
 }
 
-fn printf_o<B: fmt::Octal>(p: &FormatParams, u: B) -> String {
-    match params_to_chars(p) {
-        ('#', '_', '+', '_', _) => format!("{:+#width$o}", u, width = p.width),
-        ('_', '_', '+', '_', _) => format!("{:+width$o}", u, width = p.width),
-        ('#', '_', '_', '_', _) => format!("{:#width$o}", u, width = p.width),
-        ('#', '0', '+', '_', _) => format!("{:+#0width$o}", u, width = p.width),
-        ('_', '0', '+', '_', _) => format!("{:+0width$o}", u, width = p.width),
-        ('#', '0', '_', '_', _) => format!("{:#0width$o}", u, width = p.width),
-        ('#', '_', '+', '-', _) => format!("{:<+#width$o}", u, width = p.width),
-        ('_', '_', '+', '-', _) => format!("{:<+width$o}", u, width = p.width),
-        ('#', '_', '_', '-', _) => format!("{:<#width$o}", u, width = p.width),
-        ('#', '0', '+', '-', _) => format!("{:<+#0width$o}", u, width = p.width),
-        ('_', '0', '+', '-', _) => format!("{:<+0width$o}", u, width = p.width),
-        ('#', '0', '_', '-', _) => format!("{:<#0width$o}", u, width = p.width),
-        (_, _, _, _, _) => format!("{:width$o}", u, width = p.width),
+/// The Go type name that appears inside a `%!verb(…)` marker.
+pub fn type_name(val: &Value) -> Option<&'static str> {
+    match *val {
+        Value::Nil | Value::NoValue => None,
+        Value::Bool(_) => Some("bool"),
+        Value::String(_) => Some("string"),
+        Value::Function(_) => Some("func"),
+        Value::Array(_) => Some("[]interface {}"),
+        Value::Map(_) | Value::Object(_) => Some("map[string]interface {}"),
+        Value::Number(ref n) => Some(match n.kind() {
+            NumberKind::Float(_) => "float64",
+            NumberKind::Signed(_) => "int",
+            // A Go template literal cannot exceed an int, so this only arises from
+            // context data.
+            NumberKind::Unsigned(u) if u > i64::MAX as u64 => "uint64",
+            NumberKind::Unsigned(_) => "int",
+        }),
     }
 }
 
-fn printf_x<B: fmt::LowerHex>(p: &FormatParams, u: B) -> String {
-    match params_to_chars(p) {
-        ('#', '_', '+', '_', _) => format!("{:+#width$x}", u, width = p.width),
-        ('_', '_', '+', '_', _) => format!("{:+width$x}", u, width = p.width),
-        ('#', '_', '_', '_', _) => format!("{:#width$x}", u, width = p.width),
-        ('#', '0', '+', '_', _) => format!("{:+#0width$x}", u, width = p.width),
-        ('_', '0', '+', '_', _) => format!("{:+0width$x}", u, width = p.width),
-        ('#', '0', '_', '_', _) => format!("{:#0width$x}", u, width = p.width),
-        ('#', '_', '+', '-', _) => format!("{:<+#width$x}", u, width = p.width),
-        ('_', '_', '+', '-', _) => format!("{:<+width$x}", u, width = p.width),
-        ('#', '_', '_', '-', _) => format!("{:<#width$x}", u, width = p.width),
-        ('#', '0', '+', '-', _) => format!("{:<+#0width$x}", u, width = p.width),
-        ('_', '0', '+', '-', _) => format!("{:<+0width$x}", u, width = p.width),
-        ('#', '0', '_', '-', _) => format!("{:<#0width$x}", u, width = p.width),
-        (_, _, _, _, _) => format!("{:width$x}", u, width = p.width),
-    }
-}
+/// The integer verbs. `i128` holds both a `u64` and an `i64` without loss, so the
+/// signed and unsigned cases share one implementation.
+fn integer(p: &FormatParams, verb: char, value: i128, val: &Value) -> String {
+    let magnitude = value.unsigned_abs();
+    let (digits, prefix) = match verb {
+        'd' | 'v' => (format!("{}", magnitude), ""),
+        'b' => (format!("{:b}", magnitude), if p.sharp { "0b" } else { "" }),
+        // Go's `#` for octal is a bare leading zero, not Rust's `0o`.
+        'o' => (format!("{:o}", magnitude), if p.sharp { "0" } else { "" }),
+        'O' => (format!("{:o}", magnitude), "0o"),
+        'x' => (format!("{:x}", magnitude), if p.sharp { "0x" } else { "" }),
+        'X' => (format!("{:X}", magnitude), if p.sharp { "0X" } else { "" }),
+        'c' => return pad_text(p, &code_point(value).to_string()),
+        'q' => return pad_text(p, &quote_rune(code_point(value), p.plus)),
+        // Go reads the value as an unsigned 64-bit code point here, so a negative
+        // number shows as its two's complement: `%U` of -5 is U+FFFFFFFFFFFFFFFB.
+        'U' => return pad_text(p, &code_point_notation(p, value)),
+        'f' | 'F' => return float(p, value as f64, FloatFormat::Fixed),
+        'e' => return float(p, value as f64, FloatFormat::Exponent),
+        'E' => return float(p, value as f64, FloatFormat::ExponentUpper),
+        'g' => return float(p, value as f64, FloatFormat::General),
+        'G' => return float(p, value as f64, FloatFormat::GeneralUpper),
+        _ => return bad_verb(p, verb, val),
+    };
 
-fn printf_xx<B: fmt::UpperHex>(p: &FormatParams, u: B) -> String {
-    match params_to_chars(p) {
-        ('#', '_', '+', '_', _) => format!("{:+#width$X}", u, width = p.width),
-        ('_', '_', '+', '_', _) => format!("{:+width$X}", u, width = p.width),
-        ('#', '_', '_', '_', _) => format!("{:#width$X}", u, width = p.width),
-        ('#', '0', '+', '_', _) => format!("{:+#0width$X}", u, width = p.width),
-        ('_', '0', '+', '_', _) => format!("{:+0width$X}", u, width = p.width),
-        ('#', '0', '_', '_', _) => format!("{:#0width$X}", u, width = p.width),
-        ('#', '_', '+', '-', _) => format!("{:<+#width$X}", u, width = p.width),
-        ('_', '_', '+', '-', _) => format!("{:<+width$X}", u, width = p.width),
-        ('#', '_', '_', '-', _) => format!("{:<#width$X}", u, width = p.width),
-        ('#', '0', '+', '-', _) => format!("{:<+#0width$X}", u, width = p.width),
-        ('_', '0', '+', '-', _) => format!("{:<+0width$X}", u, width = p.width),
-        ('#', '0', '_', '-', _) => format!("{:<#0width$X}", u, width = p.width),
-        (_, _, _, _, _) => format!("{:width$X}", u, width = p.width),
-    }
-}
-
-fn printf_generic<D: fmt::Display>(p: &FormatParams, c: D) -> String {
-    if let Some(pr) = p.precision {
-        match params_to_chars(p) {
-            ('#', '_', '+', '_', _) => format!("{:+#width$.pr$}", c, width = p.width, pr = pr),
-            ('_', '_', '+', '_', _) => format!("{:+width$.pr$}", c, width = p.width, pr = pr),
-            ('#', '_', '_', '_', _) => format!("{:#width$.pr$}", c, width = p.width, pr = pr),
-            ('#', '0', '+', '_', _) => format!("{:+#0width$.pr$}", c, width = p.width, pr = pr),
-            ('_', '0', '+', '_', _) => format!("{:+0width$.pr$}", c, width = p.width, pr = pr),
-            ('#', '0', '_', '_', _) => format!("{:#0width$.pr$}", c, width = p.width, pr = pr),
-            ('#', '_', '+', '-', _) => format!("{:<+#width$.pr$}", c, width = p.width, pr = pr),
-            ('_', '_', '+', '-', _) => format!("{:<+width$.pr$}", c, width = p.width, pr = pr),
-            ('#', '_', '_', '-', _) => format!("{:<#width$.pr$}", c, width = p.width, pr = pr),
-            ('#', '0', '+', '-', _) => format!("{:<+#0width$.pr$}", c, width = p.width, pr = pr),
-            ('_', '0', '+', '-', _) => format!("{:<+0width$.pr$}", c, width = p.width, pr = pr),
-            ('#', '0', '_', '-', _) => format!("{:<#0width$.pr$}", c, width = p.width, pr = pr),
-            (_, _, _, _, _) => format!("{:width$.pr$}", c, width = p.width, pr = pr),
-        }
+    let sign = if value < 0 {
+        "-"
+    } else if p.plus {
+        "+"
+    } else if p.space {
+        " "
     } else {
-        match params_to_chars(p) {
-            ('#', '_', '+', '_', _) => format!("{:+#width$}", c, width = p.width),
-            ('_', '_', '+', '_', _) => format!("{:+width$}", c, width = p.width),
-            ('#', '_', '_', '_', _) => format!("{:#width$}", c, width = p.width),
-            ('#', '0', '+', '_', _) => format!("{:+#0width$}", c, width = p.width),
-            ('_', '0', '+', '_', _) => format!("{:+0width$}", c, width = p.width),
-            ('#', '0', '_', '_', _) => format!("{:#0width$}", c, width = p.width),
-            ('#', '_', '+', '-', _) => format!("{:<+#width$}", c, width = p.width),
-            ('_', '_', '+', '-', _) => format!("{:<+width$}", c, width = p.width),
-            ('#', '_', '_', '-', _) => format!("{:<#width$}", c, width = p.width),
-            ('#', '0', '+', '-', _) => format!("{:<+#0width$}", c, width = p.width),
-            ('_', '0', '+', '-', _) => format!("{:<+0width$}", c, width = p.width),
-            ('#', '0', '_', '-', _) => format!("{:<#0width$}", c, width = p.width),
-            (_, _, _, _, _) => format!("{:width$}", c, width = p.width),
-        }
+        ""
+    };
+
+    // Go has two ways to ask for leading zeros, `%.3d` and `%03d`. An explicit
+    // precision wins and the zero flag is then ignored, so the width is made up with
+    // spaces instead. The zero count deliberately ignores the `0x` prefix, which is
+    // why `%#08x` of 5 is ten characters wide.
+    let minimum_digits = match p.precision {
+        Some(precision) => precision,
+        None if p.zero && !p.minus && p.width > 0 => p.width - if sign.is_empty() { 0 } else { 1 },
+        None => 0,
+    };
+    let zeros = minimum_digits.saturating_sub(digits.len());
+
+    let mut text = String::with_capacity(sign.len() + prefix.len() + zeros + digits.len());
+    text.push_str(sign);
+    text.push_str(prefix);
+    for _ in 0..zeros {
+        text.push('0');
     }
+    text.push_str(&digits);
+    // The zeros are already in place, so whatever width is left takes spaces.
+    pad_with(p, &text, ' ')
 }
 
-fn printf_e<E: fmt::LowerExp>(p: &FormatParams, f: E) -> String {
-    if let Some(pr) = p.precision {
-        match params_to_chars(p) {
-            ('#', '_', '+', '_', _) => format!("{:+#width$.pr$e}", f, width = p.width, pr = pr),
-            ('_', '_', '+', '_', _) => format!("{:+width$.pr$e}", f, width = p.width, pr = pr),
-            ('#', '_', '_', '_', _) => format!("{:#width$.pr$e}", f, width = p.width, pr = pr),
-            ('#', '0', '+', '_', _) => format!("{:+#0width$.pr$e}", f, width = p.width, pr = pr),
-            ('_', '0', '+', '_', _) => format!("{:+0width$.pr$e}", f, width = p.width, pr = pr),
-            ('#', '0', '_', '_', _) => format!("{:#0width$.pr$e}", f, width = p.width, pr = pr),
-            ('#', '_', '+', '-', _) => format!("{:<+#width$.pr$e}", f, width = p.width, pr = pr),
-            ('_', '_', '+', '-', _) => format!("{:<+width$.pr$e}", f, width = p.width, pr = pr),
-            ('#', '_', '_', '-', _) => format!("{:<#width$.pr$e}", f, width = p.width, pr = pr),
-            ('#', '0', '+', '-', _) => format!("{:<+#0width$.pr$e}", f, width = p.width, pr = pr),
-            ('_', '0', '+', '-', _) => format!("{:<+0width$.pr$e}", f, width = p.width, pr = pr),
-            ('#', '0', '_', '-', _) => format!("{:<#0width$.pr$e}", f, width = p.width, pr = pr),
-            (_, _, _, _, _) => format!("{:width$.pr$e}", f, width = p.width, pr = pr),
-        }
+/// Formats a float through Go's rules, then applies the flags and width. Unlike an
+/// integer, a float keeps zero padding even when a precision is given; an infinity or
+/// a NaN is never zero padded because it does not look like a number.
+fn float(p: &FormatParams, value: f64, format: FloatFormat) -> String {
+    let text = format_float(value, format, p.precision);
+    let (written_sign, digits) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => match text.strip_prefix('+') {
+            Some(rest) => ("+", rest),
+            None => ("", text.as_str()),
+        },
+    };
+    let sign = if !written_sign.is_empty() {
+        written_sign
+    } else if p.plus {
+        "+"
+    } else if p.space {
+        " "
     } else {
-        match params_to_chars(p) {
-            ('#', '_', '+', '_', _) => format!("{:+#width$e}", f, width = p.width),
-            ('_', '_', '+', '_', _) => format!("{:+width$e}", f, width = p.width),
-            ('#', '_', '_', '_', _) => format!("{:#width$e}", f, width = p.width),
-            ('#', '0', '+', '_', _) => format!("{:+#0width$e}", f, width = p.width),
-            ('_', '0', '+', '_', _) => format!("{:+0width$e}", f, width = p.width),
-            ('#', '0', '_', '_', _) => format!("{:#0width$e}", f, width = p.width),
-            ('#', '_', '+', '-', _) => format!("{:<+#width$e}", f, width = p.width),
-            ('_', '_', '+', '-', _) => format!("{:<+width$e}", f, width = p.width),
-            ('#', '_', '_', '-', _) => format!("{:<#width$e}", f, width = p.width),
-            ('#', '0', '+', '-', _) => format!("{:<+#0width$e}", f, width = p.width),
-            ('_', '0', '+', '-', _) => format!("{:<+0width$e}", f, width = p.width),
-            ('#', '0', '_', '-', _) => format!("{:<#0width$e}", f, width = p.width),
-            (_, _, _, _, _) => format!("{:width$e}", f, width = p.width),
+        ""
+    };
+
+    let content = sign.chars().count() + digits.chars().count();
+    if p.zero && !p.minus && value.is_finite() && p.width > content {
+        let mut out = String::from(sign);
+        for _ in content..p.width {
+            out.push('0');
         }
+        out.push_str(digits);
+        return out;
     }
+    pad_with(p, &format!("{}{}", sign, digits), ' ')
 }
 
-fn printf_ee<E: fmt::UpperExp>(p: &FormatParams, f: E) -> String {
-    if let Some(pr) = p.precision {
-        match params_to_chars(p) {
-            ('#', '_', '+', '_', _) => format!("{:+#width$.pr$E}", f, width = p.width, pr = pr),
-            ('_', '_', '+', '_', _) => format!("{:+width$.pr$E}", f, width = p.width, pr = pr),
-            ('#', '_', '_', '_', _) => format!("{:#width$.pr$E}", f, width = p.width, pr = pr),
-            ('#', '0', '+', '_', _) => format!("{:+#0width$.pr$E}", f, width = p.width, pr = pr),
-            ('_', '0', '+', '_', _) => format!("{:+0width$.pr$E}", f, width = p.width, pr = pr),
-            ('#', '0', '_', '_', _) => format!("{:#0width$.pr$E}", f, width = p.width, pr = pr),
-            ('#', '_', '+', '-', _) => format!("{:<+#width$.pr$E}", f, width = p.width, pr = pr),
-            ('_', '_', '+', '-', _) => format!("{:<+width$.pr$E}", f, width = p.width, pr = pr),
-            ('#', '_', '_', '-', _) => format!("{:<#width$.pr$E}", f, width = p.width, pr = pr),
-            ('#', '0', '+', '-', _) => format!("{:<+#0width$.pr$E}", f, width = p.width, pr = pr),
-            ('_', '0', '+', '-', _) => format!("{:<+0width$.pr$E}", f, width = p.width, pr = pr),
-            ('#', '0', '_', '-', _) => format!("{:<#0width$.pr$E}", f, width = p.width, pr = pr),
-            (_, _, _, _, _) => format!("{:width$.pr$E}", f, width = p.width, pr = pr),
+/// Pads a run of text to the width. Go pads text with the zero flag's character, so
+/// `%05v` of `true` is `0true`.
+fn pad_text(p: &FormatParams, text: &str) -> String {
+    let text = match p.precision {
+        // For text a precision is a maximum length, counted in characters.
+        Some(precision) if text.chars().count() > precision => {
+            text.chars().take(precision).collect()
         }
+        _ => text.to_owned(),
+    };
+    pad_with(p, &text, if p.zero { '0' } else { ' ' })
+}
+
+/// Go's `fmt.pad`: left unless the `-` flag asked for right.
+fn pad_with(p: &FormatParams, text: &str, fill: char) -> String {
+    let length = text.chars().count();
+    if p.width <= length {
+        return text.to_owned();
+    }
+    let padding: String = std::iter::repeat_n(fill, p.width - length).collect();
+    if p.minus {
+        format!("{}{}", text, padding)
     } else {
-        match params_to_chars(p) {
-            ('#', '_', '+', '_', _) => format!("{:+#width$E}", f, width = p.width),
-            ('_', '_', '+', '_', _) => format!("{:+width$E}", f, width = p.width),
-            ('#', '_', '_', '_', _) => format!("{:#width$E}", f, width = p.width),
-            ('#', '0', '+', '_', _) => format!("{:+#0width$E}", f, width = p.width),
-            ('_', '0', '+', '_', _) => format!("{:+0width$E}", f, width = p.width),
-            ('#', '0', '_', '_', _) => format!("{:#0width$E}", f, width = p.width),
-            ('#', '_', '+', '-', _) => format!("{:<+#width$E}", f, width = p.width),
-            ('_', '_', '+', '-', _) => format!("{:<+width$E}", f, width = p.width),
-            ('#', '_', '_', '-', _) => format!("{:<#width$E}", f, width = p.width),
-            ('#', '0', '+', '-', _) => format!("{:<+#0width$E}", f, width = p.width),
-            ('_', '0', '+', '-', _) => format!("{:<+0width$E}", f, width = p.width),
-            ('#', '0', '_', '-', _) => format!("{:<#0width$E}", f, width = p.width),
-            (_, _, _, _, _) => format!("{:width$E}", f, width = p.width),
+        format!("{}{}", padding, text)
+    }
+}
+
+/// `%U`: `U+` and at least four upper-case hex digits, with the character itself
+/// appended when the `#` flag is given.
+fn code_point_notation(p: &FormatParams, value: i128) -> String {
+    let scalar = value as i64 as u64;
+    let mut out = format!("U+{:04X}", scalar);
+    if p.sharp {
+        if let Some(c) = u32::try_from(scalar).ok().and_then(char::from_u32) {
+            let _ = write!(out, " {}", quote_rune(c, false));
         }
     }
+    out
 }
 
-fn escape_char(c: char) -> String {
-    let mut s = c.escape_default().to_string();
-    if s.starts_with(r"\u") {
-        s = s.replace("{", "").replace("}", "");
+/// An invalid code point becomes the replacement character, as it does in Go.
+fn code_point(value: i128) -> char {
+    u32::try_from(value)
+        .ok()
+        .and_then(char::from_u32)
+        .unwrap_or(char::REPLACEMENT_CHARACTER)
+}
+
+/// `%x`/`%X` on a string: the hex of its bytes, with the `#` flag's prefix.
+fn hex_bytes(p: &FormatParams, s: &str, upper: bool) -> String {
+    let mut out = String::with_capacity(s.len() * 2 + 2);
+    if p.sharp {
+        out.push_str(if upper { "0X" } else { "0x" });
     }
-    s
-}
-
-struct Hexer<'a> {
-    s: &'a str,
-}
-
-impl<'a> From<&'a str> for Hexer<'a> {
-    fn from(s: &'a str) -> Self {
-        Hexer { s }
+    for byte in s.as_bytes() {
+        let _ = if upper {
+            write!(out, "{:02X}", byte)
+        } else {
+            write!(out, "{:02x}", byte)
+        };
     }
+    out
 }
 
-impl<'a> fmt::UpperHex for Hexer<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for u in self.s.as_bytes() {
-            write!(f, "{:X}", u)?
+/// Go's `%q` on a string: a backquoted raw string with the `#` flag where that is
+/// possible, `strconv.QuoteToASCII` with `+`, and `strconv.Quote` otherwise.
+fn quote_string(p: &FormatParams, s: &str) -> String {
+    if p.sharp && can_backquote(s) {
+        return format!("`{}`", s);
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        escape_into(&mut out, c, '"', p.plus);
+    }
+    out.push('"');
+    out
+}
+
+/// Go's `strconv.CanBackquote`: one line, no backquote, and no control character
+/// other than a tab.
+fn can_backquote(s: &str) -> bool {
+    s.chars().all(|c| {
+        if c == '\u{feff}' {
+            // A byte-order mark is invisible, so Go refuses to backquote it.
+            return false;
         }
-        Ok(())
+        if !c.is_ascii() {
+            return true;
+        }
+        !((c < ' ' && c != '\t') || c == '`' || c == '\u{7f}')
+    })
+}
+
+/// Go's `strconv.QuoteRune`, or `QuoteRuneToASCII` with the `+` flag.
+fn quote_rune(c: char, ascii_only: bool) -> String {
+    let mut out = String::with_capacity(8);
+    out.push('\'');
+    escape_into(&mut out, c, '\'', ascii_only);
+    out.push('\'');
+    out
+}
+
+/// Writes one character the way Go's `strconv` escapes it.
+fn escape_into(out: &mut String, c: char, quote: char, ascii_only: bool) {
+    if c == quote || c == '\\' {
+        out.push('\\');
+        out.push(c);
+        return;
+    }
+    match c {
+        '\u{7}' => out.push_str("\\a"),
+        '\u{8}' => out.push_str("\\b"),
+        '\u{c}' => out.push_str("\\f"),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        '\u{b}' => out.push_str("\\v"),
+        c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+            let _ = write!(out, "\\x{:02x}", c as u32);
+        }
+        c if c.is_control() => escape_unicode(out, c),
+        c if ascii_only && !c.is_ascii() => escape_unicode(out, c),
+        c => out.push(c),
     }
 }
 
-impl<'a> fmt::LowerHex for Hexer<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for u in self.s.as_bytes() {
-            write!(f, "{:x}", u)?
-        }
-        Ok(())
-    }
+fn escape_unicode(out: &mut String, c: char) {
+    let scalar = c as u32;
+    let _ = if scalar > 0xFFFF {
+        write!(out, "\\U{:08x}", scalar)
+    } else {
+        write!(out, "\\u{:04x}", scalar)
+    };
 }

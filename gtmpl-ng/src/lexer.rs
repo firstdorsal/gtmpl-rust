@@ -665,9 +665,13 @@ impl LexerStateMachine {
             self.accept("+-");
             self.accept_run(DECIMAL);
         }
-        // Go also takes a `p` exponent on a hexadecimal float. Scanning one here
-        // without being able to evaluate it would only turn a clear lexer error into
-        // a confusing parse error, so it stays unsupported on both sides.
+        // A hexadecimal float carries a binary `p` exponent, and its digits are
+        // decimal: `0x1.8p1` is 3. Go requires the exponent -- `0x1.8` on its own is
+        // not a number -- but that is the parser's call, not the lexer's.
+        if digits == HEXADECIMAL && self.accept("pP") {
+            self.accept("+-");
+            self.accept_run(DECIMAL);
+        }
         // Let's ignore imaginary numbers for now.
         //
         // End of input ends the number, as in Go: treating it as another character

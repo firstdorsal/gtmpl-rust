@@ -1,35 +1,9 @@
-use std::char;
-
 use gtmpl_value_ng::{FromValue, Value};
 
-use crate::error::PrintError;
-use crate::print_verb::print;
+use crate::print_verb::{print, type_name};
 
-pub fn sprintf(s: &str, args: &[Value]) -> Result<String, PrintError> {
-    let tokens = tokenize(s)?;
-    let mut fmt = String::new();
-    let mut i = 0;
-    let mut index = 0;
-    for t in tokens {
-        fmt.push_str(&s[i..t.start]);
-        let (s, idx) = process_verb(&s[t.start + 1..t.end], t.typ, args, index)?;
-        fmt.push_str(&s);
-        index = idx;
-        i = t.end + 1;
-    }
-    fmt.push_str(&s[i..]);
-    Ok(fmt)
-}
-
-struct FormatArg {
-    pub start: usize,
-    pub end: usize,
-    pub typ: char,
-}
-
-static TYPS: &str = "vVtTbcdoqxXUeEfFgGsp";
-
-#[derive(Default)]
+/// The flags, width and precision of one verb.
+#[derive(Default, Clone, Copy)]
 pub struct FormatParams {
     pub sharp: bool,
     pub zero: bool,
@@ -40,186 +14,209 @@ pub struct FormatParams {
     pub precision: Option<usize>,
 }
 
-fn process_verb(
-    s: &str,
-    typ: char,
-    args: &[Value],
-    mut index: usize,
-) -> Result<(String, usize), PrintError> {
-    let mut params = FormatParams::default();
-    let mut complex = false;
-    let mut pos = 0;
-    for (i, c) in s.chars().enumerate() {
-        match c {
-            '#' => params.sharp = true,
-            '0' => params.zero = true,
-            '+' => params.plus = true,
-            '-' => {
-                params.minus = true;
-                // Golang does not pad with zeros to the right.
-                params.zero = false;
-            }
-            ' ' => params.space = true,
-            _ => {
-                pos = i;
-                complex = true;
-                break;
-            }
+/// Formats `args` into `format` the way Go's `fmt.Sprintf` does.
+///
+/// Go's formatter never fails. A verb that does not apply to its argument, a missing
+/// argument, a leftover argument and a malformed verb all become a `%!…` marker inside
+/// the output, which is what a Go template produces and therefore what this produces.
+pub fn sprintf(format: &str, args: &[Value]) -> String {
+    let chars: Vec<char> = format.chars().collect();
+    let mut out = String::with_capacity(format.len());
+    let mut at = 0;
+    // The next argument to consume, and whether an explicit `[n]` was ever used --
+    // Go leaves leftover arguments unreported once a format has reordered them.
+    let mut arg_index = 0;
+    let mut reordered = false;
+
+    while at < chars.len() {
+        if chars[at] != '%' {
+            out.push(chars[at]);
+            at += 1;
+            continue;
         }
-    }
-    if complex {
-        let mut after_index = false;
-        let arg_num = parse_index(&s[pos..])?.map(|(i, till)| {
-            pos += till;
-            after_index = true;
-            index = i;
-            i
-        });
-        if s[pos..].starts_with('*') {
-            pos += 1;
-            let arg_num = arg_num.unwrap_or_else(|| {
-                let i = index;
-                index += 1;
-                i
-            });
-            if let Some(width) = args.get(arg_num).and_then(i64::from_value) {
-                if width < 0 {
+        at += 1;
+
+        let mut params = FormatParams::default();
+        while at < chars.len() {
+            match chars[at] {
+                '#' => params.sharp = true,
+                '0' => params.zero = !params.minus,
+                '+' => params.plus = true,
+                '-' => {
                     params.minus = true;
-                    // Golang does not pad with zeros to the right.
+                    // Go does not pad with zeros to the right.
                     params.zero = false;
                 }
-                params.width = width.unsigned_abs() as usize;
+                ' ' => params.space = true,
+                _ => break,
+            }
+            at += 1;
+        }
+
+        // An explicit argument index may appear before the width and again before the
+        // verb. `good_index` turns false for every shape Go reports as BADINDEX.
+        let mut good_index = true;
+        let mut after_index = read_index(
+            &chars,
+            &mut at,
+            args.len(),
+            &mut arg_index,
+            &mut reordered,
+            &mut good_index,
+        );
+
+        if at < chars.len() && chars[at] == '*' {
+            at += 1;
+            match take_int(args, &mut arg_index) {
+                Some(width) => {
+                    if width < 0 {
+                        params.minus = true;
+                        params.zero = false;
+                    }
+                    params.width = width.unsigned_abs() as usize;
+                }
+                None => out.push_str("%!(BADWIDTH)"),
             }
             after_index = false;
-        } else if let Some((width, till)) = parse_num(&s[pos..])? {
+        } else if let Some(width) = read_number(&chars, &mut at) {
+            // "%[3]2d": a width after an index is not something Go accepts.
             if after_index {
-                return Err(PrintError::WithAfterIndex);
+                good_index = false;
             }
-            pos += till;
             params.width = width;
         }
 
-        if pos + 1 < s.len() && s[pos..].starts_with('.') {
-            pos += 1;
+        if at + 1 < chars.len() && chars[at] == '.' {
+            at += 1;
+            // "%[3].2d", likewise.
             if after_index {
-                return Err(PrintError::PrecisionAfterIndex);
+                good_index = false;
             }
+            after_index = read_index(
+                &chars,
+                &mut at,
+                args.len(),
+                &mut arg_index,
+                &mut reordered,
+                &mut good_index,
+            );
+            if at < chars.len() && chars[at] == '*' {
+                at += 1;
+                match take_int(args, &mut arg_index) {
+                    Some(precision) => params.precision = Some(precision.max(0) as usize),
+                    None => out.push_str("%!(BADPREC)"),
+                }
+                after_index = false;
+            } else {
+                // A bare `.` means precision zero, not "no precision".
+                params.precision = Some(read_number(&chars, &mut at).unwrap_or(0));
+            }
+        }
 
-            let arg_num = parse_index(&s[pos..])?.map(|(i, till)| {
-                pos += till;
-                after_index = true;
-                index = i;
-                i
-            });
-            if s[pos..].starts_with('*') {
-                pos += 1;
-                let arg_num = arg_num.unwrap_or_else(|| {
-                    let i = index;
-                    index += 1;
-                    i
-                });
-                if let Some(prec) = args.get(arg_num).and_then(i64::from_value) {
-                    if prec < 0 {
-                        params.precision = None;
-                    }
-                    params.precision = Some(prec.unsigned_abs() as usize);
-                }
-            } else if let Some((prec, till)) = parse_num(&s[pos..])? {
-                if after_index {
-                    return Err(PrintError::PrecisionAfterIndex);
-                }
-                pos += till;
-                params.precision = Some(prec);
-            }
+        if !after_index {
+            read_index(
+                &chars,
+                &mut at,
+                args.len(),
+                &mut arg_index,
+                &mut reordered,
+                &mut good_index,
+            );
+        }
+
+        if at >= chars.len() {
+            out.push_str("%!(NOVERB)");
+            break;
+        }
+        let verb = chars[at];
+        at += 1;
+
+        if verb == '%' {
+            // `%%` consumes no argument and ignores the width and precision.
+            out.push('%');
+        } else if !good_index {
+            out.push_str(&format!("%!{}(BADINDEX)", verb));
+        } else if arg_index >= args.len() {
+            out.push_str(&format!("%!{}(MISSING)", verb));
+        } else {
+            out.push_str(&print(&params, verb, &args[arg_index]));
+            arg_index += 1;
         }
     }
 
-    let arg_num = if let Some((i, _)) = parse_index(&s[pos..])? {
-        index = i;
-        i
-    } else {
-        let i = index;
-        index += 1;
-        i
+    if !reordered && arg_index < args.len() {
+        out.push_str("%!(EXTRA ");
+        for (offset, arg) in args[arg_index..].iter().enumerate() {
+            if offset > 0 {
+                out.push_str(", ");
+            }
+            match type_name(arg) {
+                Some(name) => out.push_str(&format!("{}={}", name, arg)),
+                None => out.push_str("<nil>"),
+            }
+        }
+        out.push(')');
+    }
+    out
+}
+
+/// Reads an explicit `[n]` argument index, Go's one-based form. Returns whether one was
+/// consumed, and clears `good_index` for an index that is malformed or out of range --
+/// Go reports both as BADINDEX rather than failing.
+fn read_index(
+    chars: &[char],
+    at: &mut usize,
+    arg_count: usize,
+    arg_index: &mut usize,
+    reordered: &mut bool,
+    good_index: &mut bool,
+) -> bool {
+    if *at >= chars.len() || chars[*at] != '[' {
+        return false;
+    }
+    *reordered = true;
+    let closing = chars[*at..].iter().position(|c| *c == ']');
+    let Some(closing) = closing else {
+        // No closing bracket: Go steps over the `[` alone and reports BADINDEX.
+        *at += 1;
+        *good_index = false;
+        return false;
     };
-
-    if arg_num < args.len() {
-        return print(&params, typ, &args[arg_num]).map(|s| (s, index));
-    }
-    Err(PrintError::UnableToProcessVerb(s.to_string()))
-}
-
-fn parse_index(s: &str) -> Result<Option<(usize, usize)>, PrintError> {
-    if s.starts_with('[') {
-        let till = s
-            .find(']')
-            .ok_or_else(|| PrintError::MissingClosingBracket(s.to_string()))?;
-        s[1..till]
-            .parse::<usize>()
-            .map(|u| Some((u - 1, till + 1)))
-            .map_err(PrintError::UnableToParseIndex)
-    } else {
-        Ok(None)
-    }
-}
-
-fn parse_num(s: &str) -> Result<Option<(usize, usize)>, PrintError> {
-    let till = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-    if till > 0 {
-        s[..till]
-            .parse()
-            .map(|u| Some((u, till)))
-            .map_err(PrintError::UnableToParseWidth)
-    } else {
-        Ok(None)
-    }
-}
-
-fn tokenize(s: &str) -> Result<Vec<FormatArg>, PrintError> {
-    let mut iter = s.char_indices().peekable();
-    let mut args = Vec::new();
-    loop {
-        let from = match iter.next() {
-            None => break,
-            Some((i, '%')) => i,
-            _ => continue,
-        };
-
-        if let Some(&(_, '%')) = iter.peek() {
-            iter.next();
-            continue;
+    let digits: String = chars[*at + 1..*at + closing].iter().collect();
+    let parsed = digits.parse::<usize>();
+    *at += closing + 1;
+    match parsed {
+        // Go's indices are one-based, so `[0]` is out of range too.
+        Ok(index) if index >= 1 && index - 1 < arg_count => {
+            *arg_index = index - 1;
+            true
         }
-
-        loop {
-            match iter.next() {
-                None => {
-                    return Err(PrintError::UnableToTerminateFormatArg(
-                        s[from..].to_string(),
-                    ))
-                }
-                Some((i, t)) if TYPS.contains(t) => {
-                    args.push(FormatArg {
-                        start: from,
-                        end: i,
-                        typ: t,
-                    });
-                    break;
-                }
-                _ => continue,
-            };
+        _ => {
+            *good_index = false;
+            false
         }
     }
-    Ok(args)
 }
 
-pub fn params_to_chars(params: &FormatParams) -> (char, char, char, char, char) {
-    (
-        if params.sharp { '#' } else { '_' },
-        if params.zero { '0' } else { '_' },
-        if params.plus { '+' } else { '_' },
-        if params.minus { '-' } else { '_' },
-        if params.space { ' ' } else { '_' },
-    )
+/// Reads a run of decimal digits, if any.
+fn read_number(chars: &[char], at: &mut usize) -> Option<usize> {
+    let start = *at;
+    while *at < chars.len() && chars[*at].is_ascii_digit() {
+        *at += 1;
+    }
+    if *at == start {
+        return None;
+    }
+    let digits: String = chars[start..*at].iter().collect();
+    // A run of digits longer than `usize` is not a width anyone meant.
+    digits.parse().ok()
+}
+
+/// Consumes the next argument as an integer, for a `*` width or precision.
+fn take_int(args: &[Value], arg_index: &mut usize) -> Option<i64> {
+    let value = args.get(*arg_index)?;
+    *arg_index += 1;
+    i64::from_value(value)
 }
 
 #[cfg(test)]
@@ -228,162 +225,211 @@ mod test {
 
     use super::*;
 
-    #[test]
-    fn test_sprinttf_to_format() {
-        let s = sprintf("foo%v2000", &["bar".into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"foobar2000");
-
-        let s = sprintf("%+0v", &[1.into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"+1");
+    /// Every expectation in this module was taken from Go 1.26.8 rather than reasoned
+    /// out, by running the same template through `text/template`.
+    fn check(format: &str, args: &[Value], expected: &str) {
+        assert_eq!(sprintf(format, args), expected, "printf {:?}", format);
     }
 
     #[test]
-    fn test_sprintf_fancy() {
-        let s = sprintf("%+-#10c", &[10000.into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"✐         ");
-
-        let s = sprintf("%+-#10q", &[10000.into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"'\u2710'  ");
+    fn plain_verbs() {
+        check("foo%v2000", &["bar".into()], "foobar2000");
+        check("%+0v", &[1.into()], "+1");
+        check("foobar%d", &[2000.into()], "foobar2000");
+        check("%+0d", &[1.into()], "+1");
+        check("%+0b", &[5.into()], "+101");
+        check("%x", &[255.into()], "ff");
+        check("%#x", &[255.into()], "0xff");
+        check("%#o", &[8.into()], "010");
+        check("%U", &[65.into()], "U+0041");
+        check("%v", &[true.into()], "true");
+        check("%v", &["".into()], "");
     }
 
     #[test]
-    fn test_sprintf_string_to_hex() {
-        let s = sprintf("%x", &["foobar2000".into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"666f6f62617232303030");
-
-        let s = sprintf("%X", &["foobar2000".into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"666F6F62617232303030");
+    fn strings() {
+        check("%x", &["foobar2000".into()], "666f6f62617232303030");
+        check("%X", &["foobar2000".into()], "666F6F62617232303030");
+        check("%.6s", &["foobar2000".into()], "foobar");
+        check("%6.3s|", &["abcdef".into()], "   abc|");
+        check("%5v|", &["ab".into()], "   ab|");
+        check("%q", &["a\"b".into()], "\"a\\\"b\"");
+        check("%q", &["tab\there".into()], "\"tab\\there\"");
     }
 
     #[test]
-    fn test_sprintf_string_prec() {
-        let s = sprintf("%.6s", &["foobar2000".into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"foobar");
+    fn fancy_verbs() {
+        check("%+-#10c", &[10000.into()], "✐         ");
+        check("%+-#10q", &[10000.into()], "'\\u2710'  ");
     }
 
     #[test]
-    fn test_sprintf_index() {
-        let s = sprintf("%[1]v %v", &["foo".into(), "bar".into(), 2000.into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"foo bar");
-
-        let s = sprintf(
+    fn explicit_indices() {
+        check(
+            "%[1]v %v",
+            &["foo".into(), "bar".into(), 2000.into()],
+            "foo bar",
+        );
+        check(
             "%[2]v %v%[1]v %v%[1]v",
             &["!".into(), "wtf".into(), "golang".into()],
+            "wtf golang! wtf!",
         );
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"wtf golang! wtf!");
+        check("%[2]d", &[1.into(), 2.into()], "2");
     }
 
     #[test]
-    fn test_sprintf_number() {
-        let s = sprintf("foobar%d", &[2000.into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"foobar2000");
-
-        let s = sprintf("%+0d", &[1.into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"+1");
-
-        let s = sprintf("%+0b", &[5.into()]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"+101");
+    fn floats_follow_go() {
+        check("%v", &[Value::from(1e20)], "1e+20");
+        check("%v", &[Value::from(1e-7)], "1e-07");
+        check("%e", &[Value::from(1234.5678)], "1.234568e+03");
+        check("%E", &[Value::from(1234.5678)], "1.234568E+03");
+        check("%g", &[Value::from(1e20)], "1e+20");
+        check("%.3g", &[Value::from(1234.5678)], "1.23e+03");
+        check("%.5g", &[Value::from(3.0)], "3");
+        check("%10.2e", &[Value::from(1234.5)], "  1.23e+03");
+        check("%-12.2e|", &[Value::from(1234.5)], "1.23e+03    |");
+        check("%012.2e", &[Value::from(1234.5)], "00001.23e+03");
+        check("%+.2e", &[Value::from(1234.5)], "+1.23e+03");
+        check("% .2e", &[Value::from(1234.5)], " 1.23e+03");
+        check("%08.2f", &[Value::from(-3.5)], "-0003.50");
+        check("%+08d", &[42.into()], "+0000042");
+        check("%v", &[Value::from(f64::INFINITY)], "+Inf");
+        check("%v", &[Value::from(f64::NEG_INFINITY)], "-Inf");
+        check("%v", &[Value::from(f64::NAN)], "NaN");
+        check("%f", &[Value::from(f64::INFINITY)], "+Inf");
+        check("%08f", &[Value::from(f64::INFINITY)], "    +Inf");
     }
 
     #[test]
-    fn test_sprintf_array() {
+    fn a_verb_that_does_not_apply_is_marked_not_an_error() {
+        check("%s", &[Value::Nil], "%!s(<nil>)");
+        check("%d", &[Value::Nil], "%!d(<nil>)");
+        check("%d", &[Value::NoValue], "%!d(<nil>)");
+        check("%v", &[Value::Nil], "<nil>");
+        check("%d", &["x".into()], "%!d(string=x)");
+        check("%s", &[5.into()], "%!s(int=5)");
+        check("%d", &[true.into()], "%!d(bool=true)");
+        check("%t", &[5.into()], "%!t(int=5)");
+        check("%s", &[true.into()], "%!s(bool=true)");
+        check("%q", &[true.into()], "%!q(bool=true)");
+        check("%c", &["x".into()], "%!c(string=x)");
+        check("%d", &[Value::from(1.5)], "%!d(float64=1.5)");
+        check("%f", &["x".into()], "%!f(string=x)");
+        check("%z", &[1.into()], "%!z(int=1)");
+        check("%d", &[Value::from(f64::INFINITY)], "%!d(float64=+Inf)");
+    }
+
+    #[test]
+    fn a_container_is_marked_element_by_element() {
+        let array = Value::Array(vec![1.into(), "a".into(), true.into()]);
+        check("%d", &[array.clone()], "[1 %!d(string=a) %!d(bool=true)]");
+        check("%v", &[array], "[1 a true]");
+
+        let mut map: HashMap<String, Value> = HashMap::new();
+        map.insert("k".to_owned(), "v".into());
+        check("%s", &[Value::Map(map.clone())], "map[k:v]");
+        check("%d", &[Value::Map(map)], "map[%!d(string=k):%!d(string=v)]");
+    }
+
+    #[test]
+    fn a_map_prints_its_keys_in_order() {
+        let map: HashMap<String, Value> = [
+            ("z".to_owned(), 3.into()),
+            ("a".to_owned(), 1.into()),
+            ("m".to_owned(), 2.into()),
+        ]
+        .into_iter()
+        .collect();
+        // Sorted, as Go has sorted map keys since 1.12 -- the old implementation
+        // walked the HashMap and printed a different order from run to run.
+        check("%v", &[Value::Map(map)], "map[a:1 m:2 z:3]");
+    }
+
+    #[test]
+    fn arrays_and_maps_render_like_go() {
         let values: Vec<Value> = vec!["hello".into(), "world".into()];
-        let s = sprintf("foo %v", &[Value::Array(values)]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"foo [hello world]");
-
+        check("foo %v", &[Value::Array(values)], "foo [hello world]");
         let values: Vec<Value> = vec![42.into(), 100.into()];
-        let s = sprintf("foo %v", &[Value::Array(values)]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"foo [42 100]");
+        check("foo %v", &[Value::Array(values)], "foo [42 100]");
+
+        let mut map: HashMap<String, Value> = HashMap::new();
+        map.insert("hello".into(), "world".into());
+        map.insert("number".into(), 42.into());
+        check(
+            "foo %v",
+            &[Value::Map(map)],
+            "foo map[hello:world number:42]",
+        );
+
+        let mut map: HashMap<String, Value> = HashMap::new();
+        map.insert("float".into(), Value::from(4.2));
+        check("%v", &[Value::Map(map)], "map[float:4.2]");
     }
 
     #[test]
-    fn test_sprintf_map() {
-        let mut values: HashMap<String, Value> = HashMap::new();
-        values.insert("hello".into(), "world".into());
-        values.insert("number".into(), 42.into());
-        let s = sprintf("foo %v", &[Value::Map(values)]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        // The print order is unpredictable, we can't write
-        // a straight comparison
-        assert!(s == "foo map[number:42 hello:world]" || s == "foo map[hello:world number:42]");
-
-        let mut values: HashMap<String, Value> = HashMap::new();
-        values.insert("float".into(), 4.2.into());
-        let s = sprintf("%v", &[Value::Map(values)]);
-        assert!(s.is_ok());
-        let s = s.unwrap();
-        assert_eq!(s, r"map[float:4.2]");
+    fn missing_and_leftover_arguments_are_marked() {
+        check("%d", &[], "%!d(MISSING)");
+        check("%v %v", &[1.into()], "1 %!v(MISSING)");
+        check("%s %s", &["a".into()], "a %!s(MISSING)");
+        check("%d", &[1.into(), 2.into()], "1%!(EXTRA int=2)");
+        check("x", &[1.into()], "x%!(EXTRA int=1)");
+        check("", &[1.into(), 2.into()], "%!(EXTRA int=1, int=2)");
+        check(
+            "%v",
+            &[1.into(), "a".into(), true.into()],
+            "1%!(EXTRA string=a, bool=true)",
+        );
+        check(
+            "%d %d",
+            &[1.into(), 2.into(), 3.into()],
+            "1 2%!(EXTRA int=3)",
+        );
+        check("%%d", &[5.into()], "%d%!(EXTRA int=5)");
+        // An explicit index means Go stops reporting leftovers.
+        check("%[1]d", &[1.into(), 2.into()], "1");
     }
 
     #[test]
-    fn test_tokenize() {
-        let t = tokenize("foobar%6.2ffoobar");
-        assert!(t.is_ok());
-        let t = t.unwrap();
-        assert_eq!(t.len(), 1);
-        let a = &t[0];
-        assert_eq!(a.start, 6);
-        assert_eq!(a.end, 10);
-        assert_eq!(a.typ, 'f');
+    fn malformed_verbs_are_marked() {
+        check("100%", &[], "100%!(NOVERB)");
+        check("%", &[], "%!(NOVERB)");
+        check("%%", &[], "%");
+        check("a%!b", &[1.into()], "a%!!(int=1)b");
+        check("%[3]d", &[1.into(), 2.into()], "%!d(BADINDEX)");
+        check("%[0]d", &[5.into()], "%!d(BADINDEX)");
+        check("%[d", &[5.into()], "%!d(BADINDEX)");
+        check("%[1]2d", &[5.into()], "%!d(BADINDEX)");
+        check("%[1].2f", &[Value::from(5.5)], "%!f(BADINDEX)");
+        check("%*d", &["x".into(), 5.into()], "%!(BADWIDTH)5");
+        // Go writes `%!(BADPREC)%!f(int=5)` here: it rejects `%f` on an integer, and
+        // we cannot -- see `a_float_verb_on_an_integer_is_the_one_deviation`.
+        check("%.*f", &["x".into(), 5.into()], "%!(BADPREC)5.000000");
     }
 
+    /// The one place this formatter knowingly differs from Go.
+    ///
+    /// `Value` stores a whole float as an integer so that `{{ 3.0 }}` renders `3` the
+    /// way Go does, which means a float verb cannot tell `3` from `3.0`. Go rejects a
+    /// float verb on a true integer and writes `%!f(int=3)`; refusing the float case
+    /// instead would be the worse trade, so the verb is accepted here.
     #[test]
-    fn test_tokenize_err() {
-        let t = tokenize(" %6.2 ");
-        assert!(t.is_err());
+    fn a_float_verb_on_an_integer_is_the_one_deviation() {
+        check("%f", &[3.into()], "3.000000");
+        check("%e", &[3.into()], "3.000000e+00");
+        check("%.2f", &[3.into()], "3.00");
+        // A float that is not whole is stored as one, so it behaves exactly like Go.
+        check("%d", &[Value::from(3.5)], "%!d(float64=3.5)");
     }
 
+    // `3.14159` is a Go reference value, not pi.
+    #[allow(clippy::approx_constant)]
     #[test]
-    fn test_tokenize_none() {
-        let t = tokenize(" foo %% bar ");
-        assert!(t.is_ok());
-        let t = t.unwrap();
-        assert!(t.is_empty());
-    }
-
-    #[test]
-    fn test_parse_index() {
-        let x = parse_index("[12]");
-        assert!(x.is_ok());
-        let x = x.unwrap();
-        // Go starts with 1 in stead of 0
-        assert_eq!(x, Some((11, 4)));
-
-        let x = parse_index("[12");
-        assert!(x.is_err());
-
-        let x = parse_index("*[12]");
-        assert!(x.is_ok());
-        let x = x.unwrap();
-        assert_eq!(x, None);
+    fn star_width_and_precision() {
+        check("%*d", &[5.into(), 42.into()], "   42");
+        check("%-*d|", &[5.into(), 42.into()], "42   |");
+        check("%.*f", &[2.into(), Value::from(3.14159)], "3.14");
+        check("%-5v|", &[1.into()], "1    |");
+        check("%05v|", &[7.into()], "00007|");
     }
 }

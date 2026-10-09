@@ -21,6 +21,7 @@
 pub mod error;
 mod exec;
 pub mod funcs;
+mod go_number;
 mod lexer;
 mod node;
 mod parse;

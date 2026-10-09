@@ -1,6 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use crate::error::NodeError;
+use crate::go_number::{read_hexadecimal_float, HexadecimalFloat};
 use crate::lexer::ItemType;
 use crate::utils::unquote_char;
 
@@ -757,7 +758,6 @@ fn classify_integer_literal(text: &str) -> IntegerLiteral {
 }
 
 impl NumberNode {
-    #[allow(clippy::float_cmp)]
     pub fn new(
         tr: TreeId,
         pos: Pos,
@@ -789,8 +789,27 @@ impl NumberNode {
                 let mut is_i64 = false;
                 let mut is_u64 = false;
 
+                // A hexadecimal float is neither integer nor decimal-float syntax,
+                // so it is read before either is attempted.
+                match read_hexadecimal_float(&text) {
+                    HexadecimalFloat::Value(as_f64) => {
+                        return Ok(NumberNode {
+                            typ: NodeType::Number,
+                            tr,
+                            pos,
+                            line,
+                            col,
+                            len,
+                            text,
+                            value: Value::from(as_f64),
+                        })
+                    }
+                    HexadecimalFloat::Illegal => return Err(NodeError::IllegalNumberSyntax(text)),
+                    HexadecimalFloat::NotHexadecimal => {}
+                }
+
                 match classify_integer_literal(&text) {
-                    IntegerLiteral::Malformed => return Err(NodeError::NaN),
+                    IntegerLiteral::Malformed => return Err(NodeError::IllegalNumberSyntax(text)),
                     IntegerLiteral::Legal {
                         negative,
                         digits,
@@ -818,7 +837,7 @@ impl NumberNode {
                         }
                         if !is_i64 && !is_u64 {
                             // Too large for either, which Go reports as an overflow.
-                            return Err(NodeError::NaN);
+                            return Err(NodeError::IllegalNumberSyntax(text));
                         }
                     }
                     IntegerLiteral::NotInteger => {}
@@ -835,24 +854,13 @@ impl NumberNode {
                 } else {
                     let stripped = match strip_float_separators(&text) {
                         Some(stripped) => stripped,
-                        None => return Err(NodeError::NaN),
+                        None => return Err(NodeError::IllegalNumberSyntax(text)),
                     };
                     match stripped.parse::<f64>() {
                         Ok(parsed) => parsed,
-                        Err(_) => return Err(NodeError::NaN),
+                        Err(_) => return Err(NodeError::IllegalNumberSyntax(text)),
                     }
                 };
-
-                // A whole float still reads as an integer, so `{{ 1e3 }}` renders
-                // `1000` rather than `1000.0`.
-                if !is_i64 && ((as_f64 as i64) as f64) == as_f64 {
-                    as_i64 = as_f64 as i64;
-                    is_i64 = true;
-                }
-                if !is_u64 && ((as_f64 as u64) as f64) == as_f64 {
-                    as_u64 = as_f64 as u64;
-                    is_u64 = true;
-                }
 
                 let value = if is_u64 {
                     Value::from(as_u64)

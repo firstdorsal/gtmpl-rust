@@ -89,7 +89,37 @@ impl PartialEq for Num {
     }
 }
 
+/// Which of the three representations a [`Number`] holds.
+///
+/// Reading a number through `as_u64`/`as_i64`/`as_f64` means trying them in the right
+/// order and handling a "none of them" case that cannot happen; this says it once.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NumberKind {
+    Unsigned(u64),
+    Signed(i64),
+    Float(f64),
+}
+
 impl Number {
+    /// What this number actually holds.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gtmpl_value_ng::{Number, NumberKind};
+    ///
+    /// assert_eq!(Number::from(23u64).kind(), NumberKind::Unsigned(23));
+    /// assert_eq!(Number::from(-23i64).kind(), NumberKind::Signed(-23));
+    /// assert_eq!(Number::from(2.5).kind(), NumberKind::Float(2.5));
+    /// ```
+    pub fn kind(&self) -> NumberKind {
+        match self.n {
+            Num::U(n) => NumberKind::Unsigned(n),
+            Num::I(n) => NumberKind::Signed(n),
+            Num::F(n) => NumberKind::Float(n),
+        }
+    }
+
     /// Builds an unsigned number, keeping it unsigned.
     ///
     /// # Examples
@@ -198,11 +228,18 @@ impl Number {
 }
 
 impl fmt::Display for Number {
+    /// Renders the number the way Go prints it, which for a float means Go's `%v`:
+    /// the shortest form that round-trips, in exponent notation outside a middling
+    /// range. Rust's own `Display` would write `1e20` as `100000000000000000000`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.n {
             Num::U(n) => write!(f, "{}", n),
             Num::I(n) => write!(f, "{}", n),
-            Num::F(n) => write!(f, "{}", n),
+            Num::F(n) => f.write_str(&crate::go_fmt::format_float(
+                n,
+                crate::go_fmt::FloatFormat::General,
+                None,
+            )),
         }
     }
 }
@@ -263,16 +300,32 @@ impl From<usize> for Number {
     }
 }
 
+/// A float whose value is whole is stored as an integer, so `{{ 3.0 }}` renders `3`
+/// the way Go does. That only holds while the value actually fits an integer: an
+/// `as` cast saturates, so `1e20 as u64` used to yield `u64::MAX` and quietly replace
+/// the number with a different one. And "whole" has to mean exactly whole -- the test
+/// used to be `fract() < EPSILON`, which is true of every magnitude below about
+/// 2e-16, so `1e-20` collapsed to `0`.
 macro_rules! from_f {
     ($($ty:ident)*) => {
         $(
             impl From<$ty> for Number {
                 fn from(n: $ty) -> Self {
-                    let num = match n {
-                        n if n.fract().abs() < $ty::EPSILON => {
-                            if n.is_sign_negative() { Num::I(n as i64) } else { Num::U(n as u64) }
-                        },
-                        n => Num::F(f64::from(n)),
+                    let value = f64::from(n);
+                    // Negative zero is whole, but collapsing it to the integer `0`
+                    // would drop its sign and render `0` where Go renders `-0`.
+                    let num = if value.fract() != 0.0 || (value == 0.0 && value.is_sign_negative()) {
+                        Num::F(value)
+                    } else if value.is_sign_negative() {
+                        if value >= (i64::MIN as f64) {
+                            Num::I(value as i64)
+                        } else {
+                            Num::F(value)
+                        }
+                    } else if value < (u64::MAX as f64) {
+                        Num::U(value as u64)
+                    } else {
+                        Num::F(value)
                     };
                     Number {
                         n: num,

@@ -64,7 +64,11 @@ fn named_fields(ast: &DeriveInput) -> syn::Result<Vec<&Ident>> {
         Data::Struct(DataStruct {
             fields: Fields::Named(ref fields),
             ..
-        }) => Ok(fields.named.iter().filter_map(|f| f.ident.as_ref()).collect()),
+        }) => Ok(fields
+            .named
+            .iter()
+            .filter_map(|f| f.ident.as_ref())
+            .collect()),
         Data::Struct(DataStruct {
             fields: Fields::Unit,
             ..

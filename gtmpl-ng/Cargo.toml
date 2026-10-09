@@ -5,7 +5,7 @@ documentation = "https://docs.rs/crate/gtmpl-ng"
 keywords = ["golang", "template", "templating", "helm"]
 categories = ["template-engine"]
 readme = "README.md"
-include = ["Cargo.toml", "src/**/*.rs", "tests/**/*.rs", "benches/**/*.rs", "README.md", "LICENSE"]
+include = ["Cargo.toml", "src/**/*.rs", "tests/**/*.rs", "tests/**/*.txt", "benches/**/*.rs", "README.md", "LICENSE"]
 version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -51,7 +51,6 @@ percent-encoding = "2"
 gtmpl_value_ng = { workspace = true }
 anyhow.workspace = true
 thiserror.workspace = true
-hexf-parse = "0.2"
 
 # Optional dependencies for helm-functions
 sha1 = { version = "0.10", optional = true }

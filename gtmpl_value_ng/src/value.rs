@@ -4,7 +4,7 @@ use std::fmt;
 use thiserror::Error;
 
 #[doc(inline)]
-pub use crate::number::Number;
+pub use crate::number::{Number, NumberKind};
 
 #[derive(Debug, Error)]
 pub enum FuncError {
@@ -81,17 +81,42 @@ impl Value {
 }
 
 impl fmt::Display for Value {
+    /// Renders the value the way Go's `fmt` prints it with `%v`.
+    ///
+    /// A container used to fall back on Rust's `Debug`, so an array rendered as
+    /// `[String("a"), Bool(true)]` where Go writes `[a true]`. A map's keys are
+    /// sorted, as Go has sorted them since 1.12, so the same data renders the same way
+    /// twice.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Value::NoValue => write!(f, "<no value>"),
-            Value::Nil => write!(f, "nil"),
+            Value::Nil => write!(f, "<nil>"),
             Value::Bool(ref b) => write!(f, "{}", b),
             Value::String(ref s) => write!(f, "{}", s),
             Value::Function(ref func) => write!(f, "{}", func),
             Value::Number(ref n) => write!(f, "{}", n),
-            Value::Array(ref a) => write!(f, "{:?}", a),
-            Value::Object(ref o) => write!(f, "{:?}", o),
-            Value::Map(ref m) => write!(f, "{:?}", m),
+            Value::Array(ref a) => {
+                f.write_str("[")?;
+                for (index, item) in a.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                f.write_str("]")
+            }
+            Value::Object(ref entries) | Value::Map(ref entries) => {
+                f.write_str("map[")?;
+                let mut keys: Vec<&String> = entries.keys().collect();
+                keys.sort();
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(f, "{}:{}", key, entries[key])?;
+                }
+                f.write_str("]")
+            }
         }
     }
 }

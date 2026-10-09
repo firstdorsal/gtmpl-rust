@@ -67,10 +67,8 @@ fn float_verbs_default_to_six_digits() {
     for (source, expected) in [
         (r#"{{ printf "%f" .float }}"#, "3.500000"),
         (r#"{{ printf "%f" .whole }}"#, "3.000000"),
-        // Go writes the exponent as `e+00`; this formatter writes Rust's `e0`. See
-        // the formatting-fidelity issue -- the digits are right, the exponent's
-        // padding and sign are not.
-        (r#"{{ printf "%e" .float }}"#, "3.500000e0"),
+        (r#"{{ printf "%e" .float }}"#, "3.500000e+00"),
+        (r#"{{ printf "%E" .float }}"#, "3.500000E+00"),
         (r#"{{ printf "%.2f" .float }}"#, "3.50"),
         (r#"{{ printf "%8.3f" .float }}"#, "   3.500"),
     ] {

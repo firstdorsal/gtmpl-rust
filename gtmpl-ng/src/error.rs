@@ -1,6 +1,6 @@
 use crate::node::{ChainNode, CommandNode, Nodes, PipeNode};
 use gtmpl_value_ng::{FuncError, Value};
-use std::{fmt, num::ParseIntError, string::FromUtf8Error};
+use std::{fmt, string::FromUtf8Error};
 use thiserror::Error;
 
 /// Where in a template an error came from, so a caller can point at it.
@@ -144,32 +144,11 @@ impl ParseError {
 pub enum NodeError {
     #[error("unable to unquote")]
     UnquoteError,
-    #[error("NaN")]
-    NaN,
+    /// Go's wording, which names the literal it could not read.
+    #[error("illegal number syntax: {0:?}")]
+    IllegalNumberSyntax(String),
     #[error("not a tree node")]
     NaTN,
-}
-
-#[derive(Error, Debug)]
-pub enum PrintError {
-    #[error("unable to process verb: {0}")]
-    UnableToProcessVerb(String),
-    #[error("{0:X} is not a valid char")]
-    NotAValidChar(i128),
-    #[error("unable to format {0} as {1}")]
-    UnableToFormat(Value, char),
-    #[error("unable to terminate format arg: {0}")]
-    UnableToTerminateFormatArg(String),
-    #[error("missing ] in {0}")]
-    MissingClosingBracket(String),
-    #[error("unable to parse index: {0}")]
-    UnableToParseIndex(ParseIntError),
-    #[error("unable to parse width: {0}")]
-    UnableToParseWidth(ParseIntError),
-    #[error("width after index (e.g. %[3]2d)")]
-    WithAfterIndex,
-    #[error("precision after index (e.g. %[3].2d)")]
-    PrecisionAfterIndex,
 }
 
 #[derive(Error, Debug)]

@@ -344,8 +344,7 @@ pub fn printf(args: &[Value]) -> Result<Value, FuncError> {
         return Err(FuncError::AtLeastXArgs("printf".into(), 1));
     }
     if let Value::String(ref s) = args[0] {
-        let s = sprintf(s, &args[1..]).map_err(|e| FuncError::Other(e.into()))?;
-        Ok(val!(s))
+        Ok(val!(sprintf(s, &args[1..])))
     } else {
         Err(FuncError::Generic("printf requires a format string".into()))
     }
