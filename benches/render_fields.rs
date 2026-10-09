@@ -22,20 +22,28 @@ fn context(fields: usize) -> Context {
     Context::from(root)
 }
 
-fn render_fields(c: &mut Criterion) {
-    let mut template = Template::default();
-    template
-        .parse("{{.kind}}-{{.metadata.name}}")
-        .expect("a valid template");
+/// The same lookup written three ways. All three have to stay independent of how
+/// large the maps they walk through are, so none of them may clone an intermediate.
+const SOURCES: [(&str, &str); 3] = [
+    ("dot", "{{.kind}}-{{.metadata.name}}"),
+    ("dollar", "{{$.kind}}-{{$.metadata.name}}"),
+    ("variable", "{{$d := .}}{{$d.kind}}-{{$d.metadata.name}}"),
+];
 
-    let mut group = c.benchmark_group("render_fields");
-    for fields in [10usize, 100, 1_000] {
-        let context = context(fields);
-        group.bench_with_input(BenchmarkId::from_parameter(fields), &fields, |b, _| {
-            b.iter(|| black_box(template.render(black_box(&context)).unwrap()));
-        });
+fn render_fields(c: &mut Criterion) {
+    for (root, source) in SOURCES {
+        let mut template = Template::default();
+        template.parse(source).expect("a valid template");
+
+        let mut group = c.benchmark_group(format!("render_fields/{root}"));
+        for fields in [10usize, 100, 1_000] {
+            let context = context(fields);
+            group.bench_with_input(BenchmarkId::from_parameter(fields), &fields, |b, _| {
+                b.iter(|| black_box(template.render(black_box(&context)).unwrap()));
+            });
+        }
+        group.finish();
     }
-    group.finish();
 }
 
 criterion_group!(benches, render_fields);

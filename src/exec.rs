@@ -15,6 +15,50 @@ struct Variable {
     value: Value,
 }
 
+/// Outcome of walking a field chain through borrowed values.
+enum ChainLookup<'v> {
+    /// The chain resolved to this value; only the final value has to be cloned.
+    Found(&'v Value),
+    /// A map lookup missed on the last element, which renders as `<no value>`.
+    NoValue,
+    /// The chain reached a function-valued field. The caller has to re-walk the
+    /// chain through `eval_field`, which invokes it with its receiver.
+    Function,
+}
+
+/// Walks a field chain without cloning the intermediate values. Resolving a field is
+/// a pure lookup, so this borrows no state and works on any receiver -- dot as well
+/// as a variable's value.
+fn lookup_field_chain<'v>(
+    receiver: &'v Value,
+    ident: &[String],
+) -> Result<ChainLookup<'v>, ExecError> {
+    let n = ident.len();
+    let mut value = receiver;
+
+    for (index, field_name) in ident.iter().enumerate() {
+        let field = match value {
+            Value::Object(object) => match object.get(field_name) {
+                Some(field) => field,
+                None => return Err(ExecError::NoFieldFor(field_name.to_string(), value.clone())),
+            },
+            Value::Map(map) => match map.get(field_name) {
+                Some(field) => field,
+                None if index + 1 == n => return Ok(ChainLookup::NoValue),
+                None => return Err(ExecError::OnlyMapsAndObjectsHaveFields),
+            },
+            _ => return Err(ExecError::OnlyMapsAndObjectsHaveFields),
+        };
+
+        if matches!(field, Value::Function(_)) {
+            return Ok(ChainLookup::Function);
+        }
+        value = field;
+    }
+
+    Ok(ChainLookup::Found(value))
+}
+
 struct State<'a, 'b, 'c, T: Write> {
     template: &'a Template,
     template_name: String,
@@ -99,18 +143,22 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         Err(ExecError::VariableNotFound(name.to_owned()))
     }
 
-    fn var_value(&self, key: &str) -> Result<Value, ExecError> {
+    fn var_ref(&self, key: &str) -> Result<&Value, ExecError> {
         for context in self.vars.iter().rev() {
             for var in context.iter().rev() {
                 if var.name == key {
-                    return Ok(var.value.clone());
+                    return Ok(&var.value);
                 }
             }
         }
         if key == "$" {
-            return Ok(self.root.clone());
+            return Ok(self.root);
         }
         Err(ExecError::VariableNotFound(key.to_string()))
+    }
+
+    fn var_value(&self, key: &str) -> Result<Value, ExecError> {
+        self.var_ref(key).cloned()
     }
 
     fn walk_list(&mut self, ctx: &Context, node: &'a ListNode) -> Result<(), ExecError> {
@@ -337,31 +385,11 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         }
 
         if args.len() <= 1 && fin.is_none() {
-            let mut value = receiver;
-            let mut plain_chain = true;
-
-            for (index, field_name) in ident.iter().enumerate() {
-                let field = match value {
-                    Value::Object(object) => object.get(field_name).ok_or_else(|| {
-                        ExecError::NoFieldFor(field_name.to_string(), value.clone())
-                    })?,
-                    Value::Map(map) => match map.get(field_name) {
-                        Some(field) => field,
-                        None if index + 1 == n => return Ok(Value::NoValue),
-                        None => return Err(ExecError::OnlyMapsAndObjectsHaveFields),
-                    },
-                    _ => return Err(ExecError::OnlyMapsAndObjectsHaveFields),
-                };
-
-                if matches!(field, Value::Function(_)) {
-                    plain_chain = false;
-                    break;
-                }
-                value = field;
-            }
-
-            if plain_chain {
-                return Ok(value.clone());
+            match lookup_field_chain(receiver, ident)? {
+                ChainLookup::Found(value) => return Ok(value.clone()),
+                ChainLookup::NoValue => return Ok(Value::NoValue),
+                // Fall through to `eval_field`, which invokes the function it finds.
+                ChainLookup::Function => {}
             }
         }
 
@@ -404,11 +432,30 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         args: &[Nodes],
         fin: &Option<Value>,
     ) -> Result<Value, ExecError> {
-        let val = self.var_value(&variable.ident[0])?;
         if variable.ident.len() == 1 {
+            let val = self.var_value(&variable.ident[0])?;
             not_a_function(args, fin)?;
             return Ok(val);
         }
+
+        // Walk `$var.a.b` straight out of the variable. Going through `var_value`
+        // would clone the whole variable -- for `$` that is the entire root object --
+        // only to throw away everything but the field at the end of the chain.
+        if args.len() <= 1 && fin.is_none() {
+            let fast = match lookup_field_chain(
+                self.var_ref(&variable.ident[0])?,
+                &variable.ident[1..],
+            )? {
+                ChainLookup::Found(value) => Some(value.clone()),
+                ChainLookup::NoValue => Some(Value::NoValue),
+                ChainLookup::Function => None,
+            };
+            if let Some(value) = fast {
+                return Ok(value);
+            }
+        }
+
+        let val = self.var_value(&variable.ident[0])?;
         self.eval_field_chain(&val, &variable.ident[1..], args, fin)
     }
 

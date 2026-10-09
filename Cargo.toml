@@ -67,7 +67,7 @@ x509-parser = { version = "0.16", optional = true }
 pem = { version = "3", optional = true }
 
 [dev-dependencies]
-criterion = "0.7"
+criterion = "0.8"
 gtmpl_derive = "0.5"
 
 [[bench]]
