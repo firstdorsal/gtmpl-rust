@@ -175,6 +175,14 @@ fn read_index(
         return false;
     }
     *reordered = true;
+    // Go wants at least three characters from the bracket -- `[n]` -- before it looks
+    // for the closing one, so a format ending in `%[]` leaves the `]` as its verb
+    // rather than reporting a missing one.
+    if chars.len() - *at < 3 {
+        *at += 1;
+        *good_index = false;
+        return false;
+    }
     let closing = chars[*at..].iter().position(|c| *c == ']');
     let Some(closing) = closing else {
         // No closing bracket: Go steps over the `[` alone and reports BADINDEX.
@@ -404,6 +412,16 @@ mod test {
         check("%[0]d", &[5.into()], "%!d(BADINDEX)");
         check("%[d", &[5.into()], "%!d(BADINDEX)");
         check("%[1]2d", &[5.into()], "%!d(BADINDEX)");
+        check("%[]d", &[1.into()], "%!d(BADINDEX)");
+        // Go needs three characters from the bracket before it looks for the closing
+        // one, so here the `]` ends up being the verb.
+        check("%[]", &[1.into()], "%!](BADINDEX)");
+        check("%[", &[1.into()], "%!(NOVERB)");
+        check("%[1", &[1.into()], "%!(NOVERB)");
+        check("%[x]d", &[1.into()], "%!d(BADINDEX)");
+        check("%[1x]d", &[1.into()], "%!d(BADINDEX)");
+        check("%[10]d", &[1.into()], "%!d(BADINDEX)");
+        check("%[1]", &[1.into()], "%!(NOVERB)");
         check("%[1].2f", &[Value::from(5.5)], "%!f(BADINDEX)");
         check("%*d", &["x".into(), 5.into()], "%!(BADWIDTH)5");
         // Go writes `%!(BADPREC)%!f(int=5)` here: it rejects `%f` on an integer, and
