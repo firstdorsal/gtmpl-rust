@@ -8,9 +8,12 @@ The value type and the derive macro now live in this repository as `gtmpl_value_
 and `gtmpl_derive_ng`, so `Value` is finally ours to fix. Most of what follows is the
 consequence: formatting, which was constrained by the old crate, now matches Go.
 
-Expectations were taken from Go 1.26.8 rendering the equivalent input. 141 templates
-were diffed against it; 134 match byte for byte, and `gtmpl-ng/tests/go_conformance.txt`
-records every one of them, with its header listing the seven that differ and why.
+Expectations were taken from Go 1.26.8 rendering the equivalent input. 243 templates
+were diffed against it; 223 match byte for byte, and `gtmpl-ng/tests/go_conformance.txt`
+records every one of them. Its header accounts for all 20 that do not: 8 are the same
+failure reported in different words, 1 is identical output that Rust's debug quoting
+shows differently, and 11 are deliberate. `go_conformance.go` beside it regenerates
+the Go side, so none of this has to be taken on trust.
 
 ### Breaking
 
@@ -30,13 +33,25 @@ records every one of them, with its header listing the seven that differ and why
   literal, as Go's message does.
 - A float outside the integers is no longer collapsed to one, so `as_u64()` on a
   `Value::from(1e20)` now answers `None` where it used to answer `u64::MAX`.
-- The edition moves to 2021 across the workspace, which requires a 2021-capable
-  toolchain to build from source.
+- **`Display` for `Value` and `Number` writes different text** for containers, nil and
+  floats — see the four entries under Changed. This reaches code that only calls
+  `value.to_string()` or `format!("{}", value)` and never renders a template, so a
+  snapshot test or a log parser downstream has to be revisited.
+- **`%+v` no longer signs a number.** Go consumes the `+` for its field-name mode, so
+  `{{ printf "%+v" 42 }}` is `42` rather than `+42`. A width or precision beyond a
+  million is refused the way Go refuses it, rather than allocating for it.
+- The edition moves to 2021 across the workspace, and `rust-version` is declared as
+  1.85 — set by `std::ptr::fn_addr_eq`, not by the edition, which needs only 1.56.
 
 ### Added
 
-- `gtmpl_value_ng::format_float`, which implements Go's `strconv.FormatFloat` rules,
-  and `FloatFormat` to pick between them.
+- `gtmpl_value_ng::format_float` and `write_float`, which implement Go's
+  `strconv.FormatFloat` rules, and `FloatFormat` to pick between them.
+- `gtmpl_ng` re-exports the whole value surface — `Value`, `Number`, `NumberKind`,
+  `Function`, `Func`, `FuncError`, `FromValue`, `from_value`, `format_float`,
+  `write_float`, `FloatFormat` — so a consumer naming any of them does not need a
+  second dependency the documented manifest never mentioned.
+- `%T`, which names a value's type as Go's does.
 - `Number::kind` and `NumberKind`, so a number is read once instead of by trying
   `as_u64`/`as_i64`/`as_f64` in the right order.
 - `Number::float`, `Number::signed` and `Number::unsigned`, which build a number
@@ -76,6 +91,35 @@ records every one of them, with its header listing the seven that differ and why
 
 ### Fixed
 
+- **A template could no longer take the process down.** A width or precision was read
+  with no upper bound and used as an allocation size, so
+  `{{ printf "%.18446744073709551615d" 1 }}` panicked on a capacity overflow and a `*`
+  width from a large argument aborted outright — past the `Result` the API returns.
+  Go caps both at a million; so does this, including its habit of checking the running
+  value before taking each further digit, so `%1000001d` is still a width.
+- **A hexadecimal float with leading zeros evaluated to the wrong number.** The digits
+  past the twentieth collapse into one sticky digit, and the leading zeros pushed the
+  significant ones out of that window, so `0x0000…001p0` came out as 2^48 rather than
+  1. Silent, and wrong by any factor.
+- **`Number`'s comparison was not total.** `Number::signed` can hold a non-negative
+  value and `Number::float` a whole one, which the shortcut arms were written without —
+  so `signed(5) < unsigned(3)` was true, and a float-valued context answered `true` to
+  `ge .x 3` and `false` to `eq .x 3`. The ordering is exact across all three
+  representations now, without widening either side to `f64`, and equality is defined
+  through it so the two cannot disagree.
+- **`serde` could not serialize a struct's fields.** `Value::Object`, which
+  `#[derive(Gtmpl)]` produces, was `serde(skip)` and failed at runtime; `Value::Nil`
+  did not round-trip. Both work, and the two losses a document genuinely cannot carry
+  are documented and tested.
+- A precision truncated booleans, nils, characters and whole containers, where Go
+  truncates strings only; container elements were formatted with default flags where
+  Go passes them down; `%q` and `%x` applied the precision to their own output rather
+  than to the input; `%.0d` of zero printed a zero; `%#o` of zero doubled it; `%#O`
+  lost its leading zero; `% x` on a string did not separate the bytes; `%U` ignored
+  its precision and honoured the zero flag; a bracket naming a missing argument was
+  not counted as consumed; a hexadecimal exponent too small for any float errored
+  where Go underflows to zero; and `println` wrote `<no value>` where `print` writes
+  `<nil>`.
 - **`toYaml` no longer fails on an integer.** It read numbers through `as_f64`, which
   answers only for the float variant, so `{{ toYaml .ports }}` over a list of port
   numbers -- most of what a chart passes it -- errored with "Cannot convert number to

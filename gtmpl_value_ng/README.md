@@ -49,8 +49,18 @@ gtmpl_value_ng = { version = "0.9", features = ["gtmpl_value_compat"] }
 ```
 
 ```rust
-let legacy: gtmpl_value::Value = my_struct.into();
-let value = gtmpl_value_ng::Value::try_from(legacy)?;
+use gtmpl_value_ng::Value;
+
+#[derive(gtmpl_derive::Gtmpl)]
+struct Config {
+    name: String,
+}
+
+let legacy: gtmpl_value::Value = Config { name: "web".to_owned() }.into();
+let value = Value::try_from(legacy).expect("a plain struct converts");
+assert_eq!(value, Value::Object(
+    [("name".to_owned(), Value::from("web"))].into_iter().collect(),
+));
 ```
 
 It is `TryFrom` rather than `From` because a `gtmpl_value::Func` names the other
@@ -65,6 +75,12 @@ value was built, and the conversion carries that over rather than inventing one 
 |---|---|
 | `serde` | `Serialize`/`Deserialize` for `Value` and `Number` |
 | `gtmpl_value_compat` | the `TryFrom<gtmpl_value::Value>` conversion above |
+
+Two things a document cannot carry, so `serde` does not pretend to: `Value::Object`
+writes as a map and reads back as `Value::Map`, because provenance is not part of the
+data; and `Value::NoValue` writes as `null` and reads back as `Value::Nil`, because
+absence is not a value. A `Value::Function` is refused outright rather than written as
+something it is not.
 
 [gtmpl-ng]: https://github.com/firstdorsal/gtmpl-rust
 [gtmpl_derive_ng]: https://crates.io/crates/gtmpl_derive_ng

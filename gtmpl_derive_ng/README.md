@@ -35,7 +35,9 @@ Every named field is converted with `Into<Value>`, so a field type only has to
 implement that. The generated code names `::gtmpl_value_ng::Value` by absolute path,
 which is why `gtmpl_value_ng` has to be a dependency of your crate as well.
 
-Deriving on an enum or a tuple struct is rejected at compile time.
+Deriving on an enum, a union or a tuple struct is a compile error. A unit struct is
+accepted and produces an empty object -- there are no fields to drop, which is what
+makes the tuple-struct case different.
 
 ## Relation to `gtmpl_derive`
 

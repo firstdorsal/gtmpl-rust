@@ -397,16 +397,47 @@ fn escape_into(out: &mut String, c: char, quote: char, ascii_only: bool) {
     }
 }
 
-/// Approximates Go's `strconv.IsPrint`, which a `%q` has to apply so the result is
-/// a literal that can be read back.
+/// Go's `strconv.IsPrint`, which `%q` has to apply for its output to read back as the
+/// same string.
 ///
-/// Rust's standard library exposes no general-category table, so this covers what it
-/// can see: a control character, and any whitespace other than a plain space -- which
-/// is where the no-break space and the line and paragraph separators live. The
-/// invisible format characters (a zero-width space, a byte-order mark, a bidi
-/// override) are not reachable from `std` and still come through raw.
+/// Go takes a shortcut below U+0100 -- the ASCII graphic characters and the space,
+/// then Latin-1 from U+00A1 up, minus the soft hyphen -- which leaves the no-break
+/// space at U+00A0 unprintable. Above that it is the letters, marks, numbers,
+/// punctuation and symbols, so the invisible format characters (a zero-width space, a
+/// byte-order mark, a bidi override), the private-use areas and the unassigned code
+/// points are all escaped.
 fn is_printable(c: char) -> bool {
-    !c.is_control() && !(c.is_whitespace() && c != ' ')
+    let scalar = c as u32;
+    if scalar <= 0xFF {
+        return (0x20..=0x7E).contains(&scalar)
+            || ((0xA1..=0xFF).contains(&scalar) && scalar != 0xAD);
+    }
+    use unicode_general_category::GeneralCategory::*;
+    matches!(
+        unicode_general_category::get_general_category(c),
+        UppercaseLetter
+            | LowercaseLetter
+            | TitlecaseLetter
+            | ModifierLetter
+            | OtherLetter
+            | NonspacingMark
+            | SpacingMark
+            | EnclosingMark
+            | DecimalNumber
+            | LetterNumber
+            | OtherNumber
+            | ConnectorPunctuation
+            | DashPunctuation
+            | OpenPunctuation
+            | ClosePunctuation
+            | InitialPunctuation
+            | FinalPunctuation
+            | OtherPunctuation
+            | MathSymbol
+            | CurrencySymbol
+            | ModifierSymbol
+            | OtherSymbol
+    )
 }
 
 fn escape_unicode(out: &mut String, c: char) {
@@ -416,4 +447,195 @@ fn escape_unicode(out: &mut String, c: char) {
     } else {
         write!(out, "\\u{:04x}", scalar)
     };
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use super::*;
+    use gtmpl_value_ng::{Func, FuncError};
+
+    /// Every expectation here was taken from Go 1.26.8. The conformance fixture covers
+    /// what can be rendered with no data; these are the cases that need a value the
+    /// fixture cannot carry -- a container, a function -- plus the corners of the
+    /// quoting and code-point verbs.
+    fn check(params: &FormatParams, verb: char, value: &Value, expected: &str) {
+        assert_eq!(print(params, verb, value), expected, "verb {:?}", verb);
+    }
+
+    fn plain() -> FormatParams {
+        FormatParams::default()
+    }
+
+    fn array() -> Value {
+        Value::Array(vec![Value::from(1u64), Value::from("a"), Value::from(true)])
+    }
+
+    fn map() -> Value {
+        Value::Map(
+            [
+                ("b".to_owned(), Value::from(2u64)),
+                ("a".to_owned(), Value::from(1u64)),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    /// Go keeps the flags while it recurses and pads no brackets, so a width applies to
+    /// each element rather than to the container.
+    #[test]
+    fn a_containers_elements_carry_the_flags() {
+        let width = FormatParams {
+            width: 5,
+            ..plain()
+        };
+        check(
+            &width,
+            'd',
+            &array(),
+            "[    1 %!d(string=    a) %!d(bool= true)]",
+        );
+        check(&width, 'v', &map(), "map[    a:    1     b:    2]");
+
+        let zero = FormatParams {
+            width: 3,
+            zero: true,
+            ..plain()
+        };
+        check(&zero, 'd', &Value::Array(vec![Value::from(1u64)]), "[001]");
+
+        let precision = FormatParams {
+            precision: Some(3),
+            ..plain()
+        };
+        check(
+            &precision,
+            'd',
+            &Value::Array(vec![Value::from(1u64)]),
+            "[001]",
+        );
+    }
+
+    #[test]
+    fn a_nested_container_recurses() {
+        let nested = Value::Array(vec![array(), Value::Map(HashMap::new())]);
+        check(&plain(), 'v', &nested, "[[1 a true] map[]]");
+    }
+
+    #[test]
+    fn a_function_renders_only_for_v() {
+        fn f(a: &[Value]) -> Result<Value, FuncError> {
+            Ok(a[0].clone())
+        }
+        let function = Value::from(f as Func);
+        check(&plain(), 'v', &function, "Function");
+        check(&plain(), 'd', &function, "%!d(func=Function)");
+    }
+
+    #[test]
+    fn the_octal_verbs_follow_go() {
+        let sharp = FormatParams {
+            sharp: true,
+            ..plain()
+        };
+        check(&plain(), 'O', &Value::from(8u64), "0o10");
+        check(&sharp, 'O', &Value::from(8u64), "0o010");
+        check(&sharp, 'o', &Value::from(8u64), "010");
+        // `#` looks at the leading digit, which is already a zero here.
+        check(&sharp, 'o', &Value::from(0u64), "0");
+    }
+
+    /// `%q` on a string: `#` asks for a backquoted raw string where that is possible,
+    /// `+` for an ASCII-only escape, and neither for Go's plain quoting.
+    #[test]
+    fn string_quoting_follows_go() {
+        let sharp = FormatParams {
+            sharp: true,
+            ..plain()
+        };
+        let plus = FormatParams {
+            plus: true,
+            ..plain()
+        };
+        check(&sharp, 'q', &Value::from("hello"), "`hello`");
+        check(&sharp, 'q', &Value::from("has\ttab"), "`has\ttab`");
+        // A newline cannot live in a backquoted string, so Go falls back to quoting.
+        check(&sharp, 'q', &Value::from("a\nb"), "\"a\\nb\"");
+        // Nor can a byte-order mark, which is invisible.
+        check(&sharp, 'q', &Value::from("\u{feff}x"), "\"\\ufeffx\"");
+        check(&plain(), 'q', &Value::from("zöe"), "\"zöe\"");
+        check(&plus, 'q', &Value::from("zöe"), "\"z\\u00f6e\"");
+        check(&plus, 'q', &Value::from("🎉"), "\"\\U0001f389\"");
+        check(&plain(), 'q', &Value::from("a\"b"), "\"a\\\"b\"");
+    }
+
+    /// Go escapes a space that is not `U+0020`, which `%q` has to do for its output to
+    /// read back as the same string.
+    #[test]
+    fn unusual_spaces_are_escaped() {
+        check(&plain(), 'q', &Value::from("x\u{a0}y"), "\"x\\u00a0y\"");
+        check(&plain(), 'q', &Value::from("x\u{2028}y"), "\"x\\u2028y\"");
+        check(&plain(), 'q', &Value::from("x\u{3000}y"), "\"x\\u3000y\"");
+    }
+
+    #[test]
+    fn code_point_notation_follows_go() {
+        let sharp = FormatParams {
+            sharp: true,
+            ..plain()
+        };
+        check(&plain(), 'U', &Value::from(65u64), "U+0041");
+        check(&sharp, 'U', &Value::from(65u64), "U+0041 'A'");
+        // Not printable, so Go appends nothing.
+        check(&sharp, 'U', &Value::from(5u64), "U+0005");
+        // Go reads the value as an unsigned 64-bit code point.
+        check(&plain(), 'U', &Value::from(-5i64), "U+FFFFFFFFFFFFFFFB");
+        let wide = FormatParams {
+            precision: Some(8),
+            ..plain()
+        };
+        check(&wide, 'U', &Value::from(65u64), "U+00000041");
+    }
+
+    #[test]
+    fn hex_of_a_string_follows_go() {
+        let space = FormatParams {
+            space: true,
+            ..plain()
+        };
+        let sharp_space = FormatParams {
+            sharp: true,
+            space: true,
+            ..plain()
+        };
+        check(&plain(), 'x', &Value::from("foobar"), "666f6f626172");
+        check(&space, 'x', &Value::from("foobar"), "66 6f 6f 62 61 72");
+        check(
+            &sharp_space,
+            'x',
+            &Value::from("foobar"),
+            "0x66 0x6f 0x6f 0x62 0x61 0x72",
+        );
+        // Nothing to encode writes nothing, prefix included.
+        let sharp = FormatParams {
+            sharp: true,
+            ..plain()
+        };
+        check(&sharp, 'x', &Value::from(""), "");
+    }
+
+    #[test]
+    fn type_names_follow_go() {
+        check(&plain(), 'T', &Value::from(5u64), "int");
+        check(&plain(), 'T', &Value::from(-5i64), "int");
+        check(&plain(), 'T', &Value::from(u64::MAX), "uint64");
+        check(&plain(), 'T', &Value::from(1.5f64), "float64");
+        check(&plain(), 'T', &Value::from("s"), "string");
+        check(&plain(), 'T', &Value::from(true), "bool");
+        check(&plain(), 'T', &Value::Nil, "<nil>");
+        check(&plain(), 'T', &array(), "[]interface {}");
+        check(&plain(), 'T', &map(), "map[string]interface {}");
+    }
 }

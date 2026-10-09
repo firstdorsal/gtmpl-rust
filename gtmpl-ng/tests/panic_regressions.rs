@@ -5,7 +5,9 @@
 //! so under the default feature set this file compiles to zero tests and `cargo test`
 //! reports success having run none of it. CI uses `--all-features` for this reason.
 //! Panic cases that do not need the registry belong in `lexer_panics.rs`, which is
-//! deliberately ungated.
+//! deliberately ungated. `feature_gates.rs` reports this file as an ignored test when
+//! the feature is off, so a default run says it was skipped rather than looking
+//! complete -- keep the two together.
 #![cfg(feature = "helm-functions")]
 
 use gtmpl_ng::helm_functions::HELM_FUNCTIONS;

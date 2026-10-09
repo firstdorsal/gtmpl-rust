@@ -246,17 +246,6 @@ pub fn call(args: &[Value]) -> Result<Value, FuncError> {
     }
 }
 
-/// An implementation of golang's fmt.Sprint
-///
-/// Golang's Sprint formats using the default formats for its operands and returns the
-/// resulting string. Spaces are added between operands when neither is a string.
-///
-/// # Example
-/// ```
-/// use gtmpl_ng::template;
-/// let equal = template(r#"{{ print "Hello " . "!" }}"#, "world");
-/// assert_eq!(&equal.unwrap(), "Hello world!");
-/// ```
 /// How `print` and `println` render a value, which is Go's `fmt` and not the template
 /// printer: `fmt` writes `<nil>` where the template printer writes `<no value>`.
 fn printed(val: &Value) -> String {
@@ -267,6 +256,17 @@ fn printed(val: &Value) -> String {
     }
 }
 
+/// An implementation of golang's `fmt.Sprint`.
+///
+/// Formats its operands with their default format and returns the resulting string.
+/// A space goes between two operands when neither is a string.
+///
+/// # Example
+/// ```
+/// use gtmpl_ng::template;
+/// let equal = template(r#"{{ print "Hello " . "!" }}"#, "world");
+/// assert_eq!(&equal.unwrap(), "Hello world!");
+/// ```
 pub fn print(args: &[Value]) -> Result<Value, FuncError> {
     let mut no_space = true;
     let mut s = String::new();
@@ -319,11 +319,22 @@ pub fn println(args: &[Value]) -> Result<Value, FuncError> {
     Ok(val!(s))
 }
 
-/// An implementation of golang's fmt.Sprintf
-/// Limitations:
-/// - float:
-///   * `g`, `G`, and `b` are weired and not implement yet
-/// - pretty sure there are more
+/// An implementation of golang's `fmt.Sprintf`.
+///
+/// Like `fmt`, this never fails on a verb: one that does not apply to its argument
+/// becomes a `%!d(string=x)` marker in the output, and a missing or leftover argument
+/// a `%!d(MISSING)` or `%!(EXTRA int=2)`.
+///
+/// Where it still differs from Go, all verified against Go 1.26.8 and recorded in
+/// `tests/go_conformance.txt`:
+///
+/// - A float verb on an integer is accepted. A whole float is stored as an integer so
+///   `{{ 3.0 }}` renders `3` as it does in Go, which leaves the two indistinguishable;
+///   Go writes `%!f(int=3)`.
+/// - `%b` and `%x` on a float are not implemented -- Go writes a power-of-two mantissa
+///   and hexadecimal float notation -- and neither is `%p`.
+/// - `%#v` renders as plain `%v` rather than Go's syntax representation, and `%#g`
+///   does not restore the trailing zeros Go restores.
 ///
 /// # Example
 /// ```

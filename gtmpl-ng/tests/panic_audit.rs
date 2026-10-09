@@ -8,7 +8,9 @@
 //! so under the default feature set this file compiles to zero tests and `cargo test`
 //! reports success having run none of it. CI uses `--all-features` for this reason.
 //! Panic cases that do not need the registry belong in `lexer_panics.rs`, which is
-//! deliberately ungated.
+//! deliberately ungated. `feature_gates.rs` reports this file as an ignored test when
+//! the feature is off, so a default run says it was skipped rather than looking
+//! complete -- keep the two together.
 #![cfg(feature = "helm-functions")]
 
 use gtmpl_ng::helm_functions::{
@@ -129,7 +131,14 @@ fn tagged_yaml_value_does_not_panic() {
     let yaml = "!mytag hello";
     let parsed: serde_yaml_neo::Value = serde_yaml_neo::from_str(yaml).unwrap();
     // Should not panic; accept any Value variant.
-    let _ = serde_yaml_value_to_gtmpl_value(parsed);
+    // The behaviour being tested is specific: the user tag is dropped and the value
+    // inside it comes through. Discarding the result would let it return anything --
+    // including the null a silent fallback used to produce.
+    assert_eq!(
+        serde_yaml_value_to_gtmpl_value(parsed),
+        Value::String("hello".to_owned()),
+        "a user tag is discarded and its inner value comes through"
+    );
 }
 
 #[test]

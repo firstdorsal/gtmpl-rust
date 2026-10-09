@@ -66,3 +66,11 @@ pub fn template<T: Into<Value>>(template_str: &str, context: T) -> Result<String
     tmpl.parse(template_str)?;
     tmpl.render(&Context::from(context)).map_err(Into::into)
 }
+
+/// Compiles the README's examples as doc tests, so a documented example cannot stop
+/// building without the suite noticing. Nothing is rendered into the real docs.
+/// Gated on `all-functions` because some of the examples use it; CI runs with every
+/// feature on, so they are all checked there.
+#[cfg(all(doctest, feature = "all-functions"))]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeExamples;

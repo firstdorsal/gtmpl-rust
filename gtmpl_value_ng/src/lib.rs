@@ -65,3 +65,11 @@ mod test {
         assert_eq!(f1, f2);
     }
 }
+
+/// Compiles the README's examples as doc tests, so a documented example cannot stop
+/// building without the suite noticing. Nothing is rendered into the real docs.
+/// Gated on `gtmpl_value_compat` because some of the examples use it; CI runs with every
+/// feature on, so they are all checked there.
+#[cfg(all(doctest, feature = "gtmpl_value_compat"))]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeExamples;

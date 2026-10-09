@@ -11,6 +11,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [badges]
 maintenance = { status = "actively-developed" }
@@ -48,6 +49,9 @@ all-functions = ["helm-functions", "mows-functions"]
 [dependencies]
 lazy_static = "1"
 percent-encoding = "2"
+# `%q` has to escape whatever Go's `strconv.IsPrint` rejects, which is a Unicode
+# general-category question the standard library cannot answer.
+unicode-general-category = "1"
 gtmpl_value_ng = { workspace = true }
 anyhow.workspace = true
 thiserror.workspace = true

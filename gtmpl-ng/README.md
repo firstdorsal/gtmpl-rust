@@ -20,7 +20,14 @@ Add the following dependency to your Cargo manifest…
 ```toml
 [dependencies]
 gtmpl-ng = "0.9"
+# Only for `#[derive(Gtmpl)]`, which generates the conversion for a struct.
+gtmpl_derive_ng = "0.9"
+gtmpl_value_ng = "0.9"
 ```
+
+`gtmpl_value_ng`'s whole surface is re-exported here -- `Value`, `Number`,
+`NumberKind`, `Function`, `Func`, `FuncError`, `FromValue`, `from_value`,
+`format_float` -- so only the derive needs naming separately.
 
 and look at the docs:
 
@@ -46,8 +53,7 @@ fn main() {
 Adding custom functions:
 
 ```rust
-use gtmpl_value_ng::Function;
-use gtmpl_ng::{FuncError, gtmpl_fn, template, Value};
+use gtmpl_ng::{gtmpl_fn, template, FuncError, Function, Value};
 
 fn main() {
     gtmpl_fn!(
@@ -79,7 +85,7 @@ fn main() {
 Invoking a _method_ on a context:
 
 ```rust
-
+use anyhow::anyhow;
 use gtmpl_derive_ng::Gtmpl;
 use gtmpl_ng::{Func, FuncError, Value};
 
@@ -87,17 +93,17 @@ fn plus_one(args: &[Value]) -> Result<Value, FuncError> {
     if let Value::Object(ref o) = &args[0] {
         if let Some(Value::Number(ref n)) = o.get("num") {
             if let Some(i) = n.as_i64() {
-                return Ok((i +1).into())
+                return Ok((i + 1).into());
             }
         }
     }
-    Err(anyhow!("integer required, got: {:?}", args))
+    Err(anyhow!("integer required, got: {:?}", args).into())
 }
 
 #[derive(Gtmpl)]
 struct AddMe {
     num: u8,
-    plus_one: Func
+    plus_one: Func,
 }
 
 fn main() {
@@ -126,7 +132,8 @@ Behaviour follows Go's `text/template`:
     the chain is, so `{{ if .a.b.c }}` is simply false when any level is absent. A
     receiver of the wrong type still errors.
 -   **Number literals** follow Go's integer syntax: `0x1f`, `0b1010`, `0o17`, a bare
-    leading zero for octal (`017`), and `_` separators (`1_000`).
+    leading zero for octal (`017`), and `_` separators (`1_000`) -- and Go's
+    hexadecimal float syntax, which carries a binary exponent, so `0x1.8p1` is `3`.
 -   **An action may span lines**, and whitespace around a trim marker may be a tab or
     a newline as well as a space.
 
@@ -151,8 +158,9 @@ This is work in progress. Currently the following features are not supported:
 -   `{{break}}` and `{{continue}}` inside a `{{range}}`, which Go has had since 1.18
 -   `{{range}}` over an integer, which Go has had since 1.22: `{{range $i := 3}}`
     yields `0 1 2` there and is an error here
--   the following functions have not been implemented:
-    -   `html`, `js`, `slice`
+-   `html` and `js` have not been implemented
+-   Go's builtin `slice` is not in the default function set. `helm-functions` provides
+    a `slice`, with Helm's argument semantics rather than Go's
 -   numbers of different kinds compare permissively, Sprig-style rather than Go-style:
     `{{ eq 3.0 3 }}` and `{{ lt 5 3.5 }}` answer, where Go refuses with "incompatible
     types for comparison". A whole float is stored as an integer, which is what makes
@@ -163,6 +171,16 @@ This is work in progress. Currently the following features are not supported:
     `<no value>`
 -   declaring a variable from a large value (`{{ $top := . }}`) copies it; field reads
     through the variable do not
+-   some `printf` verbs differ from Go's `fmt`, all recorded in
+    `tests/go_conformance.txt`:
+    -   `%b` and `%x` on a float are not implemented; Go writes a power-of-two mantissa
+        and hexadecimal float notation
+    -   `%#v` renders as plain `%v` rather than Go's syntax representation
+    -   `%#g` does not restore the trailing zeros Go restores
+    -   `%p` and Go's struct-field `%+v` have no counterpart here
+    -   `%q` escapes what Rust's standard library can recognise as unprintable, which
+        misses the invisible format characters (a zero-width space, a byte-order mark)
+        that Go also escapes
 
 ## Enhancements
 
@@ -246,24 +264,22 @@ fn main() {
     let mut template = Template::default();
     template
         .parse(
-            r#"
-            {{- define "tmpl1"}} some {{ end -}}
-            {{- define "tmpl2"}} some other {{ end -}}
-            there is {{- template (.) -}} template
-            "#,
+            r#"{{- define "tmpl1"}} some {{ end -}}
+{{- define "tmpl2"}} some other {{ end -}}
+there is {{- template (.) -}} template"#,
         )
         .unwrap();
 
     let context = Context::from("tmpl2");
 
     let output = template.render(&context);
-    assert_eq!(output.unwrap(), "there is some other template".to_string());
+    assert_eq!(output.unwrap(), "there is some other template");
 }
 ```
 
 The following syntax is used:
 
-```
+```text
 {{template (pipeline)}}
 	The template with the name evaluated from the pipeline (parenthesized) is
     executed with nil data.

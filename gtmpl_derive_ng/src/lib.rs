@@ -18,6 +18,9 @@
 //! implement that. The generated code names `::gtmpl_value_ng::Value` by absolute
 //! path, so `gtmpl_value_ng` has to be a dependency of the deriving crate too.
 //!
+//! The README's example is this one; a proc-macro crate cannot export the hidden item
+//! that would doc-test the file itself, so the two are kept in step by hand.
+//!
 //! [gtmpl-ng]: https://github.com/firstdorsal/gtmpl-rust
 //! [gtmpl_value_ng]: https://docs.rs/gtmpl_value_ng
 

@@ -86,17 +86,37 @@ fn malformed_literals_are_rejected() {
     for literal in [
         "-", "+", // a bare sign used to evaluate to 0
         "0x", "0b", "0o", "0x_", // a prefix with no digits
-        "1_", "_1", "1__0", // separators that do not sit between digits
+        "1_", "1__0", // separators that do not sit between digits
         "08", "09",  // not octal
         "0xg", // not hexadecimal
+        // Hexadecimal float syntax the lexer now scans and the parser has to refuse:
+        // Go requires the binary exponent, and an exponent no float can hold.
+        "0x1.8", "0xp4", "0x1p", "0x1pz", "0x1p1024", "0x1_p4", "0x1p_4", "0x1p4_",
     ] {
+        let error = render(literal).expect_err(&format!("{} should be rejected", literal));
+        // The message names the literal, as Go's does -- an `is_err()` on its own
+        // would also hold if it failed for some unrelated reason. `0xg` and `0x1pz`
+        // are caught by the lexer and say "bad number syntax" where the parser says
+        // "illegal", which is the same split Go has.
         assert!(
-            render(literal).is_err(),
-            "{} should be rejected, got {:?}",
+            error.contains("number syntax") && error.contains(literal),
+            "{} should be reported as a bad number naming itself, said {:?}",
             literal,
-            render(literal)
+            error
         );
     }
+}
+
+/// `_1` starts with an underscore, so it is an identifier rather than a number -- Go
+/// reports it as an undefined function too, which is why it is not in the list above.
+#[test]
+fn a_leading_underscore_is_an_identifier_not_a_number() {
+    let error = render("_1").expect_err("_1 is not a function");
+    assert!(
+        error.contains("function _1 not defined"),
+        "said {:?}",
+        error
+    );
 }
 
 /// A separator has to sit between two digits in a float as well, so `1_0.5` is legal
@@ -104,11 +124,12 @@ fn malformed_literals_are_rejected() {
 #[test]
 fn malformed_float_separators_are_rejected() {
     for literal in ["1._5", "1.5_", "1_.5", "1e_3", "1e3_", ".5_", "1_e3"] {
+        let error = render(literal).expect_err(&format!("{} should be rejected", literal));
         assert!(
-            render(literal).is_err(),
-            "{} should be rejected, got {:?}",
+            error.contains("illegal number syntax"),
+            "{} should be reported as an illegal number, said {:?}",
             literal,
-            render(literal)
+            error
         );
     }
 }

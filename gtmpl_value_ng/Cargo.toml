@@ -11,6 +11,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [badges]
 maintenance = { status = "actively-developed" }
@@ -23,6 +24,9 @@ serde = ["dep:serde"]
 
 [dev-dependencies]
 serde_json = "1"
+# Only to prove the migration example: it derives against the published crate and
+# converts, which is the whole point of `gtmpl_value_compat`.
+gtmpl_derive = "0.5"
 
 [dependencies]
 anyhow.workspace = true
