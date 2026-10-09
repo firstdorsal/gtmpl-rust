@@ -148,12 +148,16 @@ than silently skipped (see `tests/feature_gates.rs`); run the whole suite with
 This is work in progress. Currently the following features are not supported:
 
 -   complex numbers
+-   `{{break}}` and `{{continue}}` inside a `{{range}}`, which Go has had since 1.18
+-   `{{range}}` over an integer, which Go has had since 1.22: `{{range $i := 3}}`
+    yields `0 1 2` there and is an error here
 -   the following functions have not been implemented:
     -   `html`, `js`, `slice`
--   a float verb on an integer is accepted where Go refuses it: `{{ printf "%f" 3 }}`
-    gives `3.000000` rather than Go's `%!f(int=3)`. A whole float is stored as an
-    integer so `{{ 3.0 }}` renders `3` the way Go does, which leaves the two
-    indistinguishable; refusing the float case would be the worse trade
+-   numbers of different kinds compare permissively, Sprig-style rather than Go-style:
+    `{{ eq 3.0 3 }}` and `{{ lt 5 3.5 }}` answer, where Go refuses with "incompatible
+    types for comparison". A whole float is stored as an integer, which is what makes
+    that work -- and it also means a float verb on an integer cannot be refused, so
+    `{{ printf "%f" 3 }}` gives `3.000000` where Go gives `%!f(int=3)`
 -   an integer literal above `i64` is accepted and printed where Go's parser refuses it
 -   rendered with no data at all, `{{ .field }}` is an error rather than Go's
     `<no value>`
