@@ -1,5 +1,11 @@
 //! Regression tests for panics that previously crashed the parser/executor
 //! instead of returning a clean error.
+//!
+//! **Requires `--all-features`.** These cases run through the helm function registry,
+//! so under the default feature set this file compiles to zero tests and `cargo test`
+//! reports success having run none of it. CI uses `--all-features` for this reason.
+//! Panic cases that do not need the registry belong in `lexer_panics.rs`, which is
+//! deliberately ungated.
 #![cfg(feature = "helm-functions")]
 
 use gtmpl_ng::helm_functions::HELM_FUNCTIONS;

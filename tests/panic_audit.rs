@@ -3,6 +3,12 @@
 //! Each `#[test]` here exercises a single suspected panic. A passing test
 //! means the code returns a clean error (or a valid result); a failing test
 //! means the code still panics.
+//!
+//! **Requires `--all-features`.** These cases run through the helm function registry,
+//! so under the default feature set this file compiles to zero tests and `cargo test`
+//! reports success having run none of it. CI uses `--all-features` for this reason.
+//! Panic cases that do not need the registry belong in `lexer_panics.rs`, which is
+//! deliberately ungated.
 #![cfg(feature = "helm-functions")]
 
 use gtmpl_ng::helm_functions::{

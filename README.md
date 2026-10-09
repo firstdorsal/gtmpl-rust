@@ -130,6 +130,18 @@ Behaviour follows Go's `text/template`:
 -   **An action may span lines**, and whitespace around a trim marker may be a tab or
     a newline as well as a space.
 
+## Running the Tests
+
+Use `--all-features`:
+
+```sh
+cargo test --all-features
+```
+
+Several suites — including both panic-regression suites — run through the optional
+function registries. Under the default feature set they compile to zero tests, and
+`cargo test` reports success having run none of them.
+
 ## Current Limitations
 
 This is work in progress. Currently the following features are not supported:
