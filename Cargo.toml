@@ -9,7 +9,7 @@ documentation = "https://docs.rs/crate/gtmpl-ng"
 keywords = ["golang", "template", "templating", "helm"]
 categories = ["template-engine"]
 readme = "README.md"
-include = ["Cargo.toml", "src/**/*.rs", "tests/**/*.rs", "README.md", "LICENSE"]
+include = ["Cargo.toml", "src/**/*.rs", "tests/**/*.rs", "benches/**/*.rs", "README.md", "LICENSE"]
 edition = "2018"
 
 [badges]
@@ -67,4 +67,9 @@ x509-parser = { version = "0.16", optional = true }
 pem = { version = "3", optional = true }
 
 [dev-dependencies]
+criterion = "0.7"
 gtmpl_derive = "0.5"
+
+[[bench]]
+name = "render_fields"
+harness = false

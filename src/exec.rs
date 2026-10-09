@@ -15,10 +15,11 @@ struct Variable {
     value: Value,
 }
 
-struct State<'a, 'b, T: Write> {
+struct State<'a, 'b, 'c, T: Write> {
     template: &'a Template,
     template_name: String,
     writer: &'b mut T,
+    root: &'c Value,
     node: Option<&'a Nodes>,
     vars: VecDeque<VecDeque<Variable>>,
     depth: usize,
@@ -46,17 +47,13 @@ impl Context {
 impl<'b> Template {
     pub fn execute<T: Write>(&self, writer: &'b mut T, data: &Context) -> Result<(), ExecError> {
         let mut vars: VecDeque<VecDeque<Variable>> = VecDeque::new();
-        let mut dot = VecDeque::new();
-        dot.push_back(Variable {
-            name: "$".to_owned(),
-            value: data.dot.clone(),
-        });
-        vars.push_back(dot);
+        vars.push_back(VecDeque::new());
 
         let mut state = State {
             template: self,
             template_name: self.name.clone(),
             writer,
+            root: &data.dot,
             node: None,
             vars,
             depth: 0,
@@ -79,7 +76,7 @@ impl<'b> Template {
     }
 }
 
-impl<'a, 'b, T: Write> State<'a, 'b, T> {
+impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     fn wrap_error(&self, err: ExecError, node: &Nodes) -> ExecError {
         ExecError::with_context(
             &self.template_name,
@@ -109,6 +106,9 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
                     return Ok(var.value.clone());
                 }
             }
+        }
+        if key == "$" {
+            return Ok(self.root.clone());
         }
         Err(ExecError::VariableNotFound(key.to_string()))
     }
@@ -164,27 +164,24 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         let tree = self.template.tree_set.get(&name);
         if let Some(tree) = tree {
             if let Some(ref root) = tree.root {
-                let mut vars = VecDeque::new();
-                let mut dot = VecDeque::new();
                 let value = if let Some(ref pipe) = template.pipe {
                     self.eval_pipeline(ctx, pipe)?
                 } else {
                     Value::NoValue
                 };
-                dot.push_back(Variable {
-                    name: "$".to_owned(),
-                    value: value.clone(),
-                });
-                vars.push_back(dot);
+                let context = Context::from(value);
+                let mut vars = VecDeque::new();
+                vars.push_back(VecDeque::new());
                 let mut new_state = State {
                     template: self.template,
                     template_name: name.clone(),
                     writer: self.writer,
+                    root: &context.dot,
                     node: None,
                     vars,
                     depth: self.depth + 1,
                 };
-                return new_state.walk(&Context::from(value), root);
+                return new_state.walk(&context, root);
             }
         }
         Err(ExecError::TemplateNotDefined(name))
@@ -338,6 +335,36 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         if n < 1 {
             return Err(ExecError::FieldChainWithoutFields);
         }
+
+        if args.len() <= 1 && fin.is_none() {
+            let mut value = receiver;
+            let mut plain_chain = true;
+
+            for (index, field_name) in ident.iter().enumerate() {
+                let field = match value {
+                    Value::Object(object) => object.get(field_name).ok_or_else(|| {
+                        ExecError::NoFieldFor(field_name.to_string(), value.clone())
+                    })?,
+                    Value::Map(map) => match map.get(field_name) {
+                        Some(field) => field,
+                        None if index + 1 == n => return Ok(Value::NoValue),
+                        None => return Err(ExecError::OnlyMapsAndObjectsHaveFields),
+                    },
+                    _ => return Err(ExecError::OnlyMapsAndObjectsHaveFields),
+                };
+
+                if matches!(field, Value::Function(_)) {
+                    plain_chain = false;
+                    break;
+                }
+                value = field;
+            }
+
+            if plain_chain {
+                return Ok(value.clone());
+            }
+        }
+
         // TODO clean shit up
         let mut r: Value = Value::from(0);
         for (i, id) in ident.iter().enumerate().take(n - 1) {
@@ -619,6 +646,22 @@ mod tests_mocked {
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
         assert_eq!(String::from_utf8(w).unwrap(), "1");
+
+        let nested: HashMap<String, Value> = [("value".to_owned(), Value::from("nested"))].into();
+        let root: HashMap<String, Value> = [
+            ("root".to_owned(), Value::from("root")),
+            ("nested".to_owned(), Value::from(nested)),
+        ]
+        .into();
+        let data = Context::from(root);
+        let mut w = Vec::new();
+        let mut t = Template::default();
+        assert!(t
+            .parse(r#"{{with .nested}}{{$.root}}/{{.value}}{{end}}"#)
+            .is_ok());
+        let out = t.execute(&mut w, &data);
+        assert!(out.is_ok());
+        assert_eq!(String::from_utf8(w).unwrap(), "root/nested");
     }
 
     #[test]
