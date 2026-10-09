@@ -260,6 +260,16 @@ pub fn call(args: &[Value]) -> Result<Value, FuncError> {
 /// let equal = template(r#"{{ print "Hello " . "!" }}"#, "world");
 /// assert_eq!(&equal.unwrap(), "Hello world!");
 /// ```
+/// How `print` and `println` render a value, which is Go's `fmt` and not the template
+/// printer: `fmt` writes `<nil>` where the template printer writes `<no value>`.
+fn printed(val: &Value) -> String {
+    if crate::utils::is_absent_or_nil(val) {
+        "<nil>".to_owned()
+    } else {
+        val.to_string()
+    }
+}
+
 pub fn print(args: &[Value]) -> Result<Value, FuncError> {
     let mut no_space = true;
     let mut s = String::new();
@@ -269,9 +279,9 @@ pub fn print(args: &[Value]) -> Result<Value, FuncError> {
             s.push_str(v);
         } else {
             if no_space {
-                s += &val.to_string();
+                s += &printed(val);
             } else {
-                s += &format!(" {}", val.to_string())
+                s += &format!(" {}", printed(val))
             }
             no_space = false;
         }

@@ -130,11 +130,6 @@ pub fn is_absent(val: &Value) -> bool {
 /// Whether `val` carries no data, either because a lookup found nothing or because it
 /// is explicitly nil. This is the right test for emptiness and truthiness; see
 /// [`is_absent`] for the cases that have to tell the two apart.
-///
-/// Only the optional function registries need it as a predicate; the engine itself
-/// spells the two variants out in exhaustive matches, which is what makes the compiler
-/// point at them when a `Value` variant is added.
-#[cfg(any(feature = "helm-functions", feature = "mows-functions"))]
 pub fn is_absent_or_nil(val: &Value) -> bool {
     matches!(val, Value::NoValue | Value::Nil)
 }

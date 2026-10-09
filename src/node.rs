@@ -625,20 +625,8 @@ impl Display for BoolNode {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum NumberType {
-    U64,
-    I64,
-    Float,
-    Char,
-}
-
 node!(NumberNode {
-    is_i64: bool,
-    is_u64: bool,
-    is_f64: bool,
     text: String,
-    number_typ: NumberType,
     value: Value,
 });
 
@@ -788,11 +776,7 @@ impl NumberNode {
                     line,
                     col,
                     len,
-                    is_i64: true,
-                    is_u64: true,
-                    is_f64: true,
                     text,
-                    number_typ: NumberType::Char,
                     value: Value::from(c as u64),
                 })
                 .ok_or(NodeError::UnquoteError),
@@ -840,19 +824,21 @@ impl NumberNode {
                     IntegerLiteral::NotInteger => {}
                 }
 
-                // `is_f64` records that the literal was written as a fraction, which
-                // is what decides how it renders; an integer is promoted to a float
-                // value as well, as Go does, but keeps its integer shape.
-                let (as_f64, is_f64) = if is_i64 || is_u64 {
-                    let promoted = if is_i64 { as_i64 as f64 } else { as_u64 as f64 };
-                    (promoted, false)
+                // An integer reading is promoted to a float as well, as Go does, so a
+                // later whole-float check has something to compare against.
+                let as_f64 = if is_i64 || is_u64 {
+                    if is_i64 {
+                        as_i64 as f64
+                    } else {
+                        as_u64 as f64
+                    }
                 } else {
                     let stripped = match strip_float_separators(&text) {
                         Some(stripped) => stripped,
                         None => return Err(NodeError::NaN),
                     };
                     match stripped.parse::<f64>() {
-                        Ok(parsed) => (parsed, true),
+                        Ok(parsed) => parsed,
                         Err(_) => return Err(NodeError::NaN),
                     }
                 };
@@ -867,14 +853,6 @@ impl NumberNode {
                     as_u64 = as_f64 as u64;
                     is_u64 = true;
                 }
-
-                let number_typ = if is_f64 {
-                    NumberType::Float
-                } else if is_u64 {
-                    NumberType::U64
-                } else {
-                    NumberType::I64
-                };
 
                 let value = if is_u64 {
                     Value::from(as_u64)
@@ -891,11 +869,7 @@ impl NumberNode {
                     line,
                     col,
                     len,
-                    is_i64,
-                    is_u64,
-                    is_f64,
                     text,
-                    number_typ,
                     value,
                 })
             }

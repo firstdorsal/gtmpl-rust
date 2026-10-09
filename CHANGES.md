@@ -60,6 +60,13 @@ below were taken from Go 1.26.6 rendering the equivalent input.
   if every character were one byte, so the trim landed inside the character.
 - Whitespace around a trim marker is the four ASCII space characters Go uses, so other
   whitespace -- a non-breaking space, say -- is text and is no longer trimmed away.
+- `printf "%v"` works for every value kind. It used to error for a signed integer and
+  for a float, so `{{ printf "%v" -5 }}` failed.
+- `printf "%f"`, `%e` and `%E` default to six digits after the point, as Go does, and
+  accept an integer. `gtmpl_value` stores a whole float as an integer, so refusing the
+  verb there would have made `%f` format `3.5` and refuse `3.0`.
+- An absent or nil value formats as `<nil>` under `%v` and `print`, instead of erroring
+  or printing `nil`.
 - A call with arguments on an absent receiver yields `<no value>` rather than
   "cannot be invoked as function", matching Go, which answers for an invalid receiver
   before it considers arguments.
@@ -82,11 +89,21 @@ below were taken from Go 1.26.6 rendering the equivalent input.
   which shrinks `ParseError` from 296 to 72 bytes and `ExecError` from 304 to 88. The
   remaining size is other large variants, not these.
 
+### Removed
+- The write-only `is_i64`, `is_u64`, `is_f64` and `number_typ` fields on `NumberNode`,
+  and the `NumberType` enum. Nothing ever read them.
+
 ### Known issues
 - Negative non-integer numbers are truncated: `{{ -3.14 }}` renders `-3`, and so does
   a `-3.14` coming from the context. The cause is in the `gtmpl_value` dependency,
   which misclassifies every negative float as whole, and it cannot be worked around
-  from here -- the value is already truncated before this crate sees it. See #13.
+  from here -- the value is already truncated before this crate sees it.
+
+  The fix exists: it is commit `eff95ed9` on that crate's `master`, written by its own
+  author in February 2025, and simply never released -- the latest version on crates.io
+  is still 0.5.1 from 2021. A workspace can pick it up today with
+  `[patch.crates-io] gtmpl_value = { git = "https://github.com/fiji-flo/gtmpl_value" }`,
+  which this crate's full suite passes against. See #13.
 
 ## [0.6.0] - 2021-06-07
 ### Added
