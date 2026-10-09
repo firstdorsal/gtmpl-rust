@@ -4,7 +4,7 @@ use std::io::Write;
 use crate::error::ExecError;
 use crate::node::*;
 use crate::template::Template;
-use crate::utils::is_true;
+use crate::utils::{is_absent, is_true};
 
 use gtmpl_value::{Func, Value};
 
@@ -155,6 +155,20 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         )
     }
 
+    /// Runs `body` in a fresh variable scope and restores the previous one, whichever
+    /// way the body returns.
+    ///
+    /// Go writes this as `defer s.pop(s.mark())`. A `Drop` guard cannot do it here:
+    /// the guard would have to hold the scope stack while the body still needs
+    /// `&mut self` for `walk_list`. Owning the push and the pop in one place has the
+    /// same effect -- a caller has no pop to forget.
+    fn in_new_scope<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        self.vars.push_back(VecDeque::new());
+        let result = body(self);
+        self.vars.pop_back();
+        result
+    }
+
     fn assign_var(&mut self, name: &str, value: Value) -> Result<(), ExecError> {
         for context in self.vars.iter_mut().rev() {
             for variable in context.iter_mut().rev() {
@@ -230,7 +244,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             Nodes::Template(ref n) => self
                 .walk_template(ctx, n)
                 .map_err(|e| self.wrap_error(e, node)),
-            _ => Err(ExecError::UnknownNode(node.clone())),
+            _ => Err(ExecError::UnknownNode(Box::new(node.clone()))),
         }
     }
 
@@ -280,7 +294,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             val = Some(self.eval_command(ctx, cmd, &val)?);
             // TODO
         }
-        let val = val.ok_or_else(|| ExecError::ErrorEvaluatingPipe(pipe.clone()))?;
+        let val = val.ok_or_else(|| ExecError::ErrorEvaluatingPipe(Box::new(pipe.clone())))?;
         for var in &pipe.decl {
             if pipe.is_assign {
                 self.assign_var(&var.ident[0], val.clone())?;
@@ -324,7 +338,9 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             Nodes::Dot(_) => Ok(ctx.dot.clone()),
             Nodes::Number(ref n) => Ok(n.value.clone()),
             Nodes::String(ref n) => Ok(n.value.clone()),
-            _ => Err(ExecError::CannotEvaluateCommand((*first_word).clone())),
+            _ => Err(ExecError::CannotEvaluateCommand(Box::new(
+                (*first_word).clone(),
+            ))),
         }
     }
 
@@ -376,7 +392,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             return Err(ExecError::NoFieldsInEvalChainNode);
         }
         if let Nodes::Nil(_) = *chain.node {
-            return Err(ExecError::NullInChain(chain.clone()));
+            return Err(ExecError::NullInChain(Box::new(chain.clone())));
         }
         let pipe = self.eval_arg(ctx, &*chain.node)?;
         self.eval_field_chain(&pipe, &chain.field, args, fin)
@@ -385,7 +401,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     fn eval_arg(&mut self, ctx: &Context, node: &Nodes) -> Result<Value, ExecError> {
         let result = match *node {
             Nodes::Dot(_) => Ok(ctx.dot.clone()),
-            //Nodes::Nil
+            Nodes::Nil(_) => Ok(Value::Nil),
             Nodes::Field(ref n) => self.eval_field_node(ctx, n, &[], &None), // args?
             Nodes::Variable(ref n) => self.eval_variable_node(n, &[], &None),
             Nodes::Pipe(ref n) => self.eval_pipeline(ctx, n),
@@ -395,7 +411,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             Nodes::String(ref n) => Ok(n.value.clone()),
             Nodes::Bool(ref n) => Ok(n.value.clone()),
             Nodes::Number(ref n) => Ok(n.value.clone()),
-            _ => Err(ExecError::InvalidArgument(node.clone())),
+            _ => Err(ExecError::InvalidArgument(Box::new(node.clone()))),
         };
         // Wrap errors with the argument node's position for better error reporting
         result.map_err(|e| self.wrap_error(e, node))
@@ -485,7 +501,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         // An absent receiver answers before the argument check, as Go does: it has no
         // fields and no methods, so `{{.map.missing.deeper "x"}}` is `<no value>`
         // rather than "cannot be invoked as function".
-        if matches!(receiver, Value::NoValue) {
+        if is_absent(receiver) {
             return Ok(Value::NoValue);
         }
         if args.len() > 1 || fin.is_some() {
@@ -533,20 +549,18 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     fn walk_if_or_with(&mut self, node: &'a Nodes, ctx: &Context) -> Result<(), ExecError> {
         let pipe = match *node {
             Nodes::If(ref n) | Nodes::With(ref n) => &n.pipe,
-            _ => return Err(ExecError::ExpectedIfOrWith(node.clone())),
+            _ => return Err(ExecError::ExpectedIfOrWith(Box::new(node.clone()))),
         };
-        self.vars.push_back(VecDeque::new());
-        let result = (|| {
-            let val = self
+        self.in_new_scope(|state| {
+            let val = state
                 .eval_pipeline(ctx, pipe)
-                .map_err(|e| self.wrap_error(e, node))?;
-            let truth = is_true(&val);
-            if truth {
+                .map_err(|e| state.wrap_error(e, node))?;
+            if is_true(&val) {
                 match *node {
-                    Nodes::If(ref n) => self.walk_list(ctx, &n.list)?,
+                    Nodes::If(ref n) => state.walk_list(ctx, &n.list)?,
                     Nodes::With(ref n) => {
                         let ctx = Context { dot: val };
-                        self.walk_list(&ctx, &n.list)?;
+                        state.walk_list(&ctx, &n.list)?;
                     }
                     _ => {}
                 }
@@ -554,16 +568,14 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                 match *node {
                     Nodes::If(ref n) | Nodes::With(ref n) => {
                         if let Some(ref otherwise) = n.else_list {
-                            self.walk_list(ctx, otherwise)?;
+                            state.walk_list(ctx, otherwise)?;
                         }
                     }
                     _ => {}
                 }
             }
             Ok(())
-        })();
-        self.vars.pop_back();
-        result
+        })
     }
 
     fn one_iteration(
@@ -580,30 +592,25 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             }
             _ => {}
         }
-        let vars = VecDeque::new();
-        self.vars.push_back(vars);
         let ctx = Context { dot: val };
-        let result = self.walk_list(&ctx, &range.list);
-        self.vars.pop_back();
-        result
+        self.in_new_scope(|state| state.walk_list(&ctx, &range.list))
     }
 
     fn walk_range(&mut self, ctx: &Context, range: &'a RangeNode) -> Result<(), ExecError> {
-        self.vars.push_back(VecDeque::new());
-        let result = (|| {
-            let val = self.eval_pipeline(ctx, &range.pipe)?;
+        self.in_new_scope(|state| {
+            let val = state.eval_pipeline(ctx, &range.pipe)?;
             let empty = match val {
                 Value::Object(ref map) | Value::Map(ref map) => {
                     let mut entries: Vec<_> = map.iter().collect();
                     entries.sort_by_key(|(key, _)| *key);
                     for (key, value) in entries {
-                        self.one_iteration(Value::from(key.clone()), value.clone(), range)?;
+                        state.one_iteration(Value::from(key.clone()), value.clone(), range)?;
                     }
                     map.is_empty()
                 }
                 Value::Array(ref values) => {
                     for (index, value) in values.iter().enumerate() {
-                        self.one_iteration(Value::from(index), value.clone(), range)?;
+                        state.one_iteration(Value::from(index), value.clone(), range)?;
                     }
                     values.is_empty()
                 }
@@ -612,13 +619,11 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             };
             if empty {
                 if let Some(ref otherwise) = range.else_list {
-                    self.walk_list(ctx, otherwise)?;
+                    state.walk_list(ctx, otherwise)?;
                 }
             }
             Ok(())
-        })();
-        self.vars.pop_back();
-        result
+        })
     }
 
     fn print_value(&mut self, val: &Value) -> Result<(), ExecError> {
@@ -629,7 +634,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
 
 fn not_a_function(args: &[Nodes], val: &Option<Value>) -> Result<(), ExecError> {
     if args.len() > 1 || val.is_some() {
-        return Err(ExecError::ArgumentForNonFunction(args[0].clone()));
+        return Err(ExecError::ArgumentForNonFunction(Box::new(args[0].clone())));
     }
     Ok(())
 }

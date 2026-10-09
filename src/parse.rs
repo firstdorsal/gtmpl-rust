@@ -5,24 +5,43 @@ use crate::lexer::{Item, ItemType, Lexer};
 use crate::node::*;
 use crate::utils::*;
 
-/// Length of the source span running from `start` to `end`.
+/// Length of the span running from `start` to `end`.
 ///
-/// Tokens are consumed strictly left to right, and `backup` only re-queues tokens
-/// without rewinding their recorded positions, so `end` never precedes `start`.
-fn span(start: Pos, end: Pos) -> usize {
+/// Tokens are consumed strictly left to right, and backing up never rewinds a
+/// recorded position, so `end` never precedes `start`.
+fn span_from_to(start: Pos, end: Pos) -> usize {
     debug_assert!(end >= start, "node ends before it starts");
     end - start
 }
 
-/// Widens a list to span from its first child to the end of its last. A list is
-/// built by appending, so its extent is only known once that is done.
-fn set_list_span(list: &mut ListNode) {
-    let start = list.pos();
-    if let Some(last) = list.nodes.last() {
-        let end = last.pos() + last.len();
-        list.set_len(span(start, end));
+/// A list spans from its first child to the end of its last, which is only known once
+/// appending is done.
+fn finish_list(list: ListNode) -> ListNode {
+    match list.nodes.last() {
+        Some(last) => {
+            let end = last.pos() + last.len();
+            list.finish(end)
+        }
+        None => list,
     }
 }
+
+/// How deeply `{{if}}`, `{{range}}`, `{{with}}`, `{{block}}` and `{{define}}` may
+/// nest.
+///
+/// The parser is recursive descent, so each level costs stack, and running out of it
+/// aborts the process instead of returning an error -- which no template, least of
+/// all an untrusted one, should be able to do. Without a cap, a few hundred levels of
+/// `{{if}}` in under 10 KiB of source was enough.
+///
+/// Measured here, a level costs roughly 4 KiB in a release build and 20 KiB in a
+/// debug one, so this limit holds on Rust's default stacks -- 8 MiB for the main
+/// thread, 2 MiB for a spawned one, where a debug build manages 64 levels and fails
+/// at 70. It cannot hold for an arbitrarily small stack: a 256 KiB thread overflows at
+/// 16 levels in a debug build. That is inherent to recursive descent rather than
+/// something a constant can fix. Real templates nest a handful of levels; Go needs no
+/// limit because goroutine stacks grow on demand.
+const MAX_PARSE_DEPTH: usize = 64;
 
 pub struct Parser {
     name: String,
@@ -38,6 +57,7 @@ pub struct Parser {
     tree: Option<Tree>,
     tree_stack: VecDeque<Tree>,
     max_tree_id: TreeId,
+    depth: usize,
 }
 
 pub struct Tree {
@@ -63,6 +83,7 @@ impl Parser {
             tree: None,
             tree_stack: VecDeque::new(),
             max_tree_id: 0,
+            depth: 0,
         }
     }
 }
@@ -231,7 +252,7 @@ impl Parser {
                     Err(e) => return Err(e.into()),
                     Ok(false) => {
                         let err =
-                            format!("template multiple definitions of template {}", &tree.name);
+                            format!("template multiple definitions of template {}", tree.name);
                         return self.error(&err);
                     }
                     Ok(true) => {}
@@ -311,8 +332,14 @@ impl Parser {
             };
         }
         self.backup(t);
-        if let Some(Nodes::List(root)) = self.tree.as_mut().and_then(|tree| tree.root.as_mut()) {
-            set_list_span(root);
+        if let Some(root) = self.tree.as_mut().and_then(|tree| tree.root.take()) {
+            let root = match root {
+                Nodes::List(list) => Nodes::List(finish_list(list)),
+                other => other,
+            };
+            if let Some(tree) = self.tree.as_mut() {
+                tree.root = Some(root);
+            }
         }
         Ok(())
     }
@@ -335,6 +362,19 @@ impl Parser {
     }
 
     fn item_list(&mut self) -> Result<(ListNode, Nodes), ParseError> {
+        // Every nested body reaches the parser through here, so this is the one place
+        // the nesting level has to be counted -- and the counter has to come back down
+        // however the body returns.
+        self.depth += 1;
+        let result = self.item_list_at_depth();
+        self.depth -= 1;
+        result
+    }
+
+    fn item_list_at_depth(&mut self) -> Result<(ListNode, Nodes), ParseError> {
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(ParseError::MaxParseDepth(MAX_PARSE_DEPTH));
+        }
         let peeked = self.peek_non_space_must("item list")?;
         let pos = peeked.pos;
         let line = peeked.line;
@@ -345,8 +385,7 @@ impl Parser {
             let node = self.text_or_action()?;
             match *node.typ() {
                 NodeType::End | NodeType::Else => {
-                    set_list_span(&mut list);
-                    return Ok((list, node));
+                    return Ok((finish_list(list), node));
                 }
                 _ => list.append(node),
             }
@@ -409,27 +448,22 @@ impl Parser {
         &mut self,
         allow_else_if: bool,
         context: &str,
-    ) -> Result<
-        (
-            Pos,
-            usize,
-            usize,
-            usize,
-            PipeNode,
-            ListNode,
-            Option<ListNode>,
-        ),
-        ParseError,
-    > {
+    ) -> Result<(NodeSpan, PipeNode, ListNode, Option<ListNode>), ParseError> {
         let vars_len = self
             .tree
             .as_ref()
             .map(|t| t.vars.len())
             .ok_or(ParseError::NoTree)?;
         let pipe = self.pipeline(context)?;
-        let pipe_line = pipe.line();
-        let pipe_col = pipe.col();
-        let pipe_len = pipe.len();
+        // A control takes its span from its pipeline, so an error in the pipeline is
+        // reported against the expression that failed rather than the keyword.
+        let span = NodeSpan::at(
+            self.tree_id,
+            pipe.pos(),
+            pipe.line(),
+            pipe.col(),
+            pipe.len(),
+        );
         let (list, next) = self.item_list()?;
         let else_list = match *next.typ() {
             NodeType::End => None,
@@ -444,7 +478,7 @@ impl Parser {
                         next.len(),
                     );
                     else_list.append(self.if_control()?);
-                    Some(else_list)
+                    Some(finish_list(else_list))
                 } else {
                     let (else_list, next) = self.item_list()?;
                     if *next.typ() != NodeType::End {
@@ -458,57 +492,24 @@ impl Parser {
         if let Some(t) = self.tree.as_mut() {
             t.pop_vars(vars_len);
         }
-        Ok((
-            pipe.pos(),
-            pipe_line,
-            pipe_col,
-            pipe_len,
-            pipe,
-            list,
-            else_list,
-        ))
+        Ok((span, pipe, list, else_list))
     }
 
     fn if_control(&mut self) -> Result<Nodes, ParseError> {
-        let (pos, line, col, len, pipe, list, else_list) = self.parse_control(true, "if")?;
-        Ok(Nodes::If(IfNode::new_if(
-            self.tree_id,
-            pos,
-            line,
-            col,
-            len,
-            pipe,
-            list,
-            else_list,
-        )))
+        let (span, pipe, list, else_list) = self.parse_control(true, "if")?;
+        Ok(Nodes::If(IfNode::new_if(span, pipe, list, else_list)))
     }
 
     fn range_control(&mut self) -> Result<Nodes, ParseError> {
-        let (pos, line, col, len, pipe, list, else_list) = self.parse_control(false, "range")?;
+        let (span, pipe, list, else_list) = self.parse_control(false, "range")?;
         Ok(Nodes::Range(RangeNode::new_range(
-            self.tree_id,
-            pos,
-            line,
-            col,
-            len,
-            pipe,
-            list,
-            else_list,
+            span, pipe, list, else_list,
         )))
     }
 
     fn with_control(&mut self) -> Result<Nodes, ParseError> {
-        let (pos, line, col, len, pipe, list, else_list) = self.parse_control(false, "with")?;
-        Ok(Nodes::With(WithNode::new_with(
-            self.tree_id,
-            pos,
-            line,
-            col,
-            len,
-            pipe,
-            list,
-            else_list,
-        )))
+        let (span, pipe, list, else_list) = self.parse_control(false, "with")?;
+        Ok(Nodes::With(WithNode::new_with(span, pipe, list, else_list)))
     }
 
     fn end_control(&mut self) -> Result<Nodes, ParseError> {
@@ -564,7 +565,7 @@ impl Parser {
             token.line,
             token.col,
             // Spans the data pipeline, which is where an error here comes from.
-            span(token.pos, pipe.pos() + pipe.len()),
+            span_from_to(token.pos, pipe.pos() + pipe.len()),
             PipeOrString::String(name),
             Some(pipe),
         )))
@@ -578,11 +579,21 @@ impl Parser {
             #[cfg(feature = "gtmpl_dynamic_template")]
             {
                 let pipe = self.pipeline(context)?;
-                self.next_must("template name pipeline end")?;
-                PipeOrString::Pipe(pipe)
+                let close = self.next_must("template name pipeline end")?;
+                // Anchor the name on its parentheses, the way a parenthesised term is
+                // anchored elsewhere, so a span taken from it covers what was written.
+                let end = close.pos + close.val.len();
+                let span = NodeSpan::at(
+                    self.tree_id,
+                    token.pos,
+                    token.line,
+                    token.col,
+                    span_from_to(token.pos, end),
+                );
+                PipeOrString::Pipe(pipe.reanchor(span))
             }
             #[cfg(not(feature = "gtmpl_dynamic_template"))]
-            return Err(ParseError::NoDynamicTemplate.into());
+            return Err(ParseError::NoDynamicTemplate);
         } else {
             PipeOrString::String(self.parse_template_name(&token, context)?)
         };
@@ -595,9 +606,15 @@ impl Parser {
         };
         // An error inside the data pipeline is reported against this node, so the
         // span has to cover the pipeline and not just the template name.
-        let len = match pipe.as_ref() {
-            Some(pipe) => span(token.pos, pipe.pos() + pipe.len()),
-            None => token_len,
+        let len = match (pipe.as_ref(), &name) {
+            (Some(pipe), _) => span_from_to(token.pos, pipe.pos() + pipe.len()),
+            // A parenthesised name is an expression in its own right, and without a
+            // data pipe it is the only thing the span could point at.
+            #[cfg(feature = "gtmpl_dynamic_template")]
+            (None, PipeOrString::Pipe(name_pipe)) => {
+                span_from_to(token.pos, name_pipe.pos() + name_pipe.len())
+            }
+            (None, _) => token_len,
         };
         Ok(Nodes::Template(TemplateNode::new(
             self.tree_id,
@@ -676,7 +693,8 @@ impl Parser {
                     // trailing space stay out of it. `check_pipeline` has already
                     // rejected an empty pipeline.
                     if let Some(last) = pipe.cmds.last() {
-                        pipe.set_len(span(pipe.pos(), last.pos() + last.len()));
+                        let end = last.pos() + last.len();
+                        pipe = pipe.finish(end);
                     }
                     if token.typ == ItemType::ItemRightParen {
                         self.backup(token);
@@ -759,7 +777,8 @@ impl Parser {
             return self.error("empty command");
         }
         if let Some(last) = cmd.args.last() {
-            cmd.set_len(span(cmd.pos(), last.pos() + last.len()));
+            let end = last.pos() + last.len();
+            cmd = cmd.finish(end);
         }
         Ok(cmd)
     }
@@ -813,8 +832,8 @@ impl Parser {
                         chain.add(&field.val);
                     }
                     let chain_str = chain.to_string();
-                    let chain_len = span(base_pos, chain_end);
-                    chain.set_len(chain_len);
+                    let chain = chain.finish(chain_end);
+                    let chain_len = chain.len();
                     let n = match typ {
                         NodeType::Field => Nodes::Field(FieldNode::new(
                             self.tree_id,
@@ -852,13 +871,10 @@ impl Parser {
                 if !self.has_func(&token.val) {
                     return self.error(&format!("function {} not defined", token.val));
                 }
-                let mut node = IdentifierNode::new(token.val);
-                node.set_pos(token.pos);
-                node.set_line(token.line);
-                node.set_col(token.col);
-                node.set_len(token_len);
-                node.set_tree(self.tree_id);
-                Nodes::Identifier(node)
+                Nodes::Identifier(IdentifierNode::at(
+                    NodeSpan::at(self.tree_id, token.pos, token.line, token.col, token_len),
+                    token.val,
+                ))
             }
             ItemType::ItemDot => Nodes::Dot(DotNode::new(
                 self.tree_id,
@@ -918,7 +934,19 @@ impl Parser {
                 if next.typ != ItemType::ItemRightParen {
                     return self.error(&format!("unclosed right paren: unexpected {}", next));
                 }
-                Nodes::Pipe(pipe)
+                // As a term this stands for the whole parenthesised expression, so it
+                // is anchored at the `(` and reaches past the `)`. Left on the inner
+                // pipeline's own span, a chain built on it would start after the `(`
+                // while still ending past the `)`.
+                let end = next.pos + next.val.len();
+                let span = NodeSpan::at(
+                    self.tree_id,
+                    token.pos,
+                    token.line,
+                    token.col,
+                    span_from_to(token.pos, end),
+                );
+                Nodes::Pipe(pipe.reanchor(span))
             }
             ItemType::ItemString | ItemType::ItemRawString => {
                 if let Some(s) = unquote_str(&token.val) {
@@ -1028,7 +1056,7 @@ mod tests_mocked {
         make_parser_with_funcs(s, &[])
     }
 
-    fn make_parser_with_funcs<'a>(s: &str, funcs: &[&'a str]) -> Parser {
+    fn make_parser_with_funcs(s: &str, funcs: &[&str]) -> Parser {
         let lex = Lexer::new(s.to_owned());
         Parser {
             name: String::from("foo"),
@@ -1044,6 +1072,7 @@ mod tests_mocked {
             tree: None,
             tree_stack: VecDeque::new(),
             max_tree_id: 0,
+            depth: 0,
         }
     }
 

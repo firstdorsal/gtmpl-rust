@@ -6,6 +6,15 @@ use crate::printf::{params_to_chars, FormatParams};
 
 use gtmpl_value::Value;
 
+/// Go's `%f`, `%e` and `%E` default to six digits after the point when no precision
+/// is given; Rust's `Display`/`LowerExp` default to the shortest representation.
+fn with_default_precision(p: &FormatParams, precision: usize) -> FormatParams {
+    FormatParams {
+        precision: p.precision.or(Some(precision)),
+        ..*p
+    }
+}
+
 /// Print a verb like golang's printf.
 pub fn print(p: &FormatParams, typ: char, val: &Value) -> Result<String, PrintError> {
     match *val {
@@ -26,6 +35,13 @@ pub fn print(p: &FormatParams, typ: char, val: &Value) -> Result<String, PrintEr
                 'x' => printf_x(p, u),
                 'X' => printf_xx(p, u),
                 'U' => printf_generic(p, format!("U+{:X}", u)),
+                // `gtmpl_value` stores a whole float as an integer, so a float verb
+                // has to work here too -- otherwise `%f` would format 3.5 and refuse
+                // 3.0. Go can tell the two apart and rejects the verb on a true
+                // integer; we cannot, and failing the float case is the worse trade.
+                'f' | 'F' => printf_generic(&with_default_precision(p, 6), u as f64),
+                'e' => printf_e(&with_default_precision(p, 6), u as f64),
+                'E' => printf_ee(&with_default_precision(p, 6), u as f64),
                 _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
             })
         }
@@ -33,7 +49,7 @@ pub fn print(p: &FormatParams, typ: char, val: &Value) -> Result<String, PrintEr
             let i = n.as_i64().unwrap();
             Ok(match typ {
                 'b' => printf_b(p, i),
-                'd' => printf_generic(p, i),
+                'd' | 'v' => printf_generic(p, i),
                 'o' => printf_o(p, i),
                 'c' => {
                     let c = char::from_u32(i as u32).ok_or(PrintError::NotAValidChar(i as i128))?;
@@ -46,18 +62,32 @@ pub fn print(p: &FormatParams, typ: char, val: &Value) -> Result<String, PrintEr
                 'x' => printf_x(p, i),
                 'X' => printf_xx(p, i),
                 'U' => printf_generic(p, format!("U+{:X}", i)),
+                'f' | 'F' => printf_generic(&with_default_precision(p, 6), i as f64),
+                'e' => printf_e(&with_default_precision(p, 6), i as f64),
+                'E' => printf_ee(&with_default_precision(p, 6), i as f64),
                 _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
             })
         }
         Value::Number(ref n) if n.as_f64().is_some() => {
             let f = n.as_f64().unwrap();
             Ok(match typ {
-                'e' => printf_e(p, f),
-                'E' => printf_ee(p, f),
-                'f' | 'F' => printf_generic(p, f),
+                'e' => printf_e(&with_default_precision(p, 6), f),
+                'E' => printf_ee(&with_default_precision(p, 6), f),
+                'f' | 'F' => printf_generic(&with_default_precision(p, 6), f),
+                // `%v` on a float is the shortest form that round-trips, which is
+                // what `Display` already gives: `3.14` stays `3.14` and `3.0`
+                // prints as `3`.
+                'v' | 'g' => printf_generic(p, f),
                 _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
             })
         }
+        // An absent or nil value has no representation of its own, so `%v` renders it
+        // the way Go's formatter does. Other verbs would need Go's `%!verb(value)`
+        // notation, which this formatter has no concept of.
+        Value::Nil | Value::NoValue => Ok(match typ {
+            'v' => printf_generic(p, "<nil>"),
+            _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),
+        }),
         Value::Bool(ref b) => Ok(match typ {
             'v' | 't' => printf_generic(p, b),
             _ => return Err(PrintError::UnableToFormat(val.clone(), typ)),

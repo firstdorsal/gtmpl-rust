@@ -6,10 +6,32 @@ use std::thread;
 
 type Pos = usize;
 
-static LEFT_TRIM_MARKER: &str = "- ";
-static RIGHT_TRIM_MARKER: &str = " -";
-/// `RIGHT_TRIM_MARKER` followed by `RIGHT_DELIM`.
-static RIGHT_TRIM_DELIM: &str = " -}}";
+/// The character that turns a delimiter into a trimming one.
+const TRIM_MARKER: char = '-';
+/// A trim marker plus the whitespace character that has to accompany it.
+const TRIM_MARKER_LEN: usize = 2;
+
+/// Whitespace as Go's template lexer defines it. Deliberately not
+/// `char::is_whitespace`: Go treats anything else, a non-breaking space included, as
+/// an unrecognized character inside an action.
+fn is_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\r' | '\n')
+}
+
+/// Whether `s` starts with `- ` -- a trim marker followed by whitespace, which is how
+/// a left delimiter asks for the preceding text to be trimmed.
+fn has_left_trim_marker(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next() == Some(TRIM_MARKER) && chars.next().map(is_space).unwrap_or(false)
+}
+
+/// Whether `s` starts with ` -` -- whitespace followed by a trim marker, which is how
+/// a right delimiter asks for the following text to be trimmed. The whitespace belongs
+/// to the delimiter, not to the action.
+fn has_right_trim_marker(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().map(is_space).unwrap_or(false) && chars.next() == Some(TRIM_MARKER)
+}
 static LEFT_DELIM: &str = "{{";
 static RIGHT_DELIM: &str = "}}";
 static LEFT_COMMENT: &str = "/*";
@@ -107,6 +129,49 @@ pub struct Lexer {
     finished: bool,                 // flag if lexer is finished
 }
 
+/// Resolves the line and column of a byte offset on demand.
+///
+/// Tokens are emitted in increasing offset order, so each lookup continues from the
+/// previous one and the input is walked once overall. Deriving the position beats
+/// maintaining it incrementally: a token that spans a newline -- a raw string, a
+/// comment, a multi-line action -- used to report the line *after* itself, and the
+/// column subtraction underflowed and panicked outright.
+struct Position {
+    offset: Pos,
+    line: usize,
+    line_start: Pos,
+}
+
+impl Position {
+    fn new() -> Position {
+        Position {
+            offset: 0,
+            line: 1,
+            line_start: 0,
+        }
+    }
+
+    /// 1-based line and column of `offset`.
+    fn at(&mut self, input: &str, offset: Pos) -> (usize, usize) {
+        // Offsets only ever move forward: every caller passes `self.start`, which is
+        // assigned from `self.pos` after the scan has already advanced past it.
+        debug_assert!(
+            offset >= self.offset,
+            "position asked to walk backwards, from {} to {}",
+            self.offset,
+            offset
+        );
+        for (index, c) in input[self.offset..offset].char_indices() {
+            if c == '\n' {
+                self.line += 1;
+                self.line_start = self.offset + index + 1;
+            }
+        }
+        self.offset = offset;
+        (self.line, offset - self.line_start + 1)
+    }
+}
+
 struct LexerStateMachine {
     input: String,              // the string being scanned
     state: State,               // the next lexing function to enter
@@ -115,8 +180,7 @@ struct LexerStateMachine {
     width: Pos,                 // width of last rune read from input
     items_sender: Sender<Item>, // channel of scanned items
     paren_depth: usize,         // nesting depth of ( ) exprs
-    line: usize,                // 1+number of newlines seen
-    line_start: Pos,            // position of the start of the current line
+    position: Position,         // resolves line/column for emitted items
 }
 
 #[derive(Debug)]
@@ -171,8 +235,7 @@ impl Lexer {
             width: 0,
             items_sender: tx,
             paren_depth: 0,
-            line: 1,
-            line_start: 0,
+            position: Position::new(),
         };
         thread::spawn(move || l.run());
         Lexer {
@@ -200,10 +263,6 @@ impl Iterator for LexerStateMachine {
             Some(c) => {
                 self.width = c.len_utf8();
                 self.pos += self.width;
-                if c == '\n' {
-                    self.line += 1;
-                    self.line_start = self.pos;
-                }
                 Some(c)
             }
             None => {
@@ -243,20 +302,6 @@ impl LexerStateMachine {
         // amount. Subtracting one byte leaves `pos` inside a multi-byte character
         // and the next slice panics on a non-char-boundary index.
         self.pos -= self.width;
-        if self.width == 1
-            && self.input[self.pos..]
-                .chars()
-                .next()
-                .and_then(|c| if c == '\n' { Some(()) } else { None })
-                .is_some()
-        {
-            self.line -= 1;
-            // Find the start of the previous line by searching backwards for newline
-            self.line_start = self.input[..self.pos]
-                .rfind('\n')
-                .map(|i| i + 1)
-                .unwrap_or(0);
-        }
     }
 
     fn peek(&mut self) -> Option<char> {
@@ -266,26 +311,11 @@ impl LexerStateMachine {
     }
 
     fn emit(&mut self, t: ItemType) {
-        let s = &self.input[self.start..self.pos];
-        // Count actual newlines in the token to track line numbers correctly.
-        // Previously, ItemText/ItemRawString/ItemLeftDelim/ItemRightDelim always
-        // added 1 to the line count, which was incorrect (e.g., {{ and }} contain
-        // no newlines, so they shouldn't increment the line counter).
-        let lines = s.chars().filter(|c| *c == '\n').count();
-        // Calculate column as 1-based offset from line start
-        let col = self.start - self.line_start + 1;
+        let (line, col) = self.position.at(&self.input, self.start);
+        let value = &self.input[self.start..self.pos];
         self.items_sender
-            .send(Item::new(t, self.start, s, self.line, col))
+            .send(Item::new(t, self.start, value, line, col))
             .unwrap();
-        // Update line tracking for multiline tokens
-        self.line += lines;
-        if lines > 0 {
-            // Find the start of the last line in this token
-            self.line_start = self.input[..self.pos]
-                .rfind('\n')
-                .map(|i| i + 1)
-                .unwrap_or(0);
-        }
         self.start = self.pos;
     }
 
@@ -306,27 +336,21 @@ impl LexerStateMachine {
     }
 
     fn errorf(&mut self, msg: &str) -> State {
-        let col = self.start - self.line_start + 1;
+        let (line, col) = self.position.at(&self.input, self.start);
         self.items_sender
-            .send(Item::new(
-                ItemType::ItemError,
-                self.start,
-                msg,
-                self.line,
-                col,
-            ))
+            .send(Item::new(ItemType::ItemError, self.start, msg, line, col))
             .unwrap();
         State::End
     }
 
     fn lex_text(&mut self) -> State {
         self.width = 0;
-        let x = self.input[self.pos..].find(&LEFT_DELIM);
+        let x = self.input[self.pos..].find(LEFT_DELIM);
         match x {
             Some(x) => {
                 self.pos += x;
                 let ld = self.pos + LEFT_DELIM.len();
-                let trim = if self.input[ld..].starts_with(LEFT_TRIM_MARKER) {
+                let trim = if has_left_trim_marker(&self.input[ld..]) {
                     rtrim_len(&self.input[self.start..self.pos])
                 } else {
                     0
@@ -334,20 +358,6 @@ impl LexerStateMachine {
                 self.pos -= trim;
                 if self.pos > self.start {
                     self.emit(ItemType::ItemText);
-                }
-                // Count newlines in the trimmed portion (whether or not text was emitted)
-                // This ensures line numbers stay correct when {{- trims whitespace with newlines
-                if trim > 0 {
-                    let trimmed = &self.input[self.pos..self.pos + trim];
-                    let newlines = trimmed.chars().filter(|c| *c == '\n').count();
-                    if newlines > 0 {
-                        self.line += newlines;
-                        // Find the start of the last line in the trimmed content
-                        self.line_start = self.input[..self.pos + trim]
-                            .rfind('\n')
-                            .map(|i| i + 1)
-                            .unwrap_or(0);
-                    }
                 }
                 self.pos += trim;
                 self.ignore();
@@ -364,11 +374,19 @@ impl LexerStateMachine {
         }
     }
 
+    /// Whether a trim-marked right delimiter begins at `at`, i.e. whitespace, the
+    /// marker, then the delimiter. One definition so the delimiter scan and the
+    /// whitespace run cannot disagree about what counts.
+    fn at_right_trim_delim(&self, at: usize) -> bool {
+        let rest = &self.input[at..];
+        has_right_trim_marker(rest) && rest[TRIM_MARKER_LEN..].starts_with(RIGHT_DELIM)
+    }
+
     fn at_right_delim(&mut self) -> (bool, bool) {
-        if self.input[self.pos..].starts_with(&RIGHT_DELIM) {
+        if self.input[self.pos..].starts_with(RIGHT_DELIM) {
             return (true, false);
         }
-        if self.input[self.pos..].starts_with(&format!("{}{}", RIGHT_TRIM_MARKER, RIGHT_DELIM)) {
+        if self.at_right_trim_delim(self.pos) {
             return (true, true);
         }
         (false, false)
@@ -376,8 +394,8 @@ impl LexerStateMachine {
 
     fn lex_left_delim(&mut self) -> State {
         self.pos += LEFT_DELIM.len();
-        let trim = self.input[self.pos..].starts_with(LEFT_TRIM_MARKER);
-        let after_marker = if trim { LEFT_TRIM_MARKER.len() } else { 0 };
+        let trim = has_left_trim_marker(&self.input[self.pos..]);
+        let after_marker = if trim { TRIM_MARKER_LEN } else { 0 };
         if self.input[(self.pos + after_marker)..].starts_with(LEFT_COMMENT) {
             self.pos += after_marker;
             self.ignore();
@@ -408,25 +426,13 @@ impl LexerStateMachine {
         }
 
         if trim {
-            self.pos += RIGHT_TRIM_MARKER.len();
+            self.pos += TRIM_MARKER_LEN;
         }
 
         self.pos += RIGHT_DELIM.len();
 
         if trim {
-            let trim_len = ltrim_len(&self.input[self.pos..]);
-            if trim_len > 0 {
-                let trimmed = &self.input[self.pos..self.pos + trim_len];
-                let newlines = trimmed.chars().filter(|c| *c == '\n').count();
-                if newlines > 0 {
-                    self.line += newlines;
-                    self.line_start = self.input[..self.pos + trim_len]
-                        .rfind('\n')
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
-                }
-                self.pos += trim_len;
-            }
+            self.pos += ltrim_len(&self.input[self.pos..]);
         }
 
         self.ignore();
@@ -434,28 +440,15 @@ impl LexerStateMachine {
     }
 
     fn lex_right_delim(&mut self) -> State {
-        let trim = self.input[self.pos..].starts_with(RIGHT_TRIM_MARKER);
+        let trim = has_right_trim_marker(&self.input[self.pos..]);
         if trim {
-            self.pos += RIGHT_TRIM_MARKER.len();
+            self.pos += TRIM_MARKER_LEN;
             self.ignore();
         }
         self.pos += RIGHT_DELIM.len();
         self.emit(ItemType::ItemRightDelim);
         if trim {
-            let trim_len = ltrim_len(&self.input[self.pos..]);
-            if trim_len > 0 {
-                let trimmed = &self.input[self.pos..self.pos + trim_len];
-                let newlines = trimmed.chars().filter(|c| *c == '\n').count();
-                if newlines > 0 {
-                    self.line += newlines;
-                    // Find the start of the last line in the trimmed content
-                    self.line_start = self.input[..self.pos + trim_len]
-                        .rfind('\n')
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
-                }
-                self.pos += trim_len;
-            }
+            self.pos += ltrim_len(&self.input[self.pos..]);
             self.ignore();
         }
         State::LexText
@@ -471,7 +464,7 @@ impl LexerStateMachine {
         }
 
         match self.next() {
-            None | Some('\r') | Some('\n') => self.errorf("unclosed action"),
+            None => self.errorf("unclosed action"),
             Some(c) => {
                 match c {
                     '"' => State::LexQuote,
@@ -517,7 +510,7 @@ impl LexerStateMachine {
                         self.backup();
                         State::LexNumber
                     }
-                    _ if c.is_whitespace() => State::LexSpace,
+                    _ if is_space(c) => State::LexSpace,
                     _ if c.is_alphanumeric() || c == '_' => {
                         self.backup();
                         State::LexIdentifier
@@ -534,30 +527,15 @@ impl LexerStateMachine {
     }
 
     fn lex_space(&mut self) -> State {
-        // The first space was already consumed by `lex_inside_action`.
-        let mut spaces = 1;
-        let mut last_space = self.pos - self.width;
-        while self.peek().map(|c| c.is_whitespace()).unwrap_or_default() {
-            last_space = self.pos;
+        // The first whitespace character was already consumed by `lex_inside_action`,
+        // which checked for a delimiter before doing so, so it cannot be the one that
+        // belongs to a `-}}`.
+        //
+        // The whitespace in front of a trim-marked right delimiter is part of the
+        // delimiter, so the run stops before it rather than swallowing it and leaving
+        // the `-` to be lexed as a number.
+        while !self.at_right_trim_delim(self.pos) && self.peek().map(is_space).unwrap_or(false) {
             self.next();
-            spaces += 1;
-        }
-
-        // A trim-marked right delimiter is a space followed by `-}}`, and that space
-        // belongs to the delimiter rather than to this run. `at_right_delim` only
-        // looks at the current position, so hand the space back before emitting --
-        // otherwise the `-` is lexed as a number and becomes a stray argument.
-        // The character at `last_space` is a plain space whenever the marker
-        // matches, so resetting the offset cannot undo any line bookkeeping.
-        if self.input[last_space..].starts_with(RIGHT_TRIM_DELIM) {
-            // Only reachable for a run of two or more: `lex_inside_action` already
-            // checked this exact position before entering, and for a single space
-            // `last_space` *is* that position.
-            debug_assert!(
-                spaces > 1,
-                "single space before a trim marker reached lex_space"
-            );
-            self.pos = last_space;
         }
 
         self.emit(ItemType::ItemSpace);
@@ -615,7 +593,9 @@ impl LexerStateMachine {
                     _ => RIGHT_DELIM.starts_with(c),
                 }
             }
-            None => false,
+            // Go counts end of input as a terminator, so an unclosed action is
+            // reported as exactly that rather than as a bad character.
+            None => true,
         }
     }
 
@@ -653,24 +633,46 @@ impl LexerStateMachine {
         }
     }
 
+    /// Scans the shape of a number without judging it. Go's integer literals allow
+    /// a base prefix and `_` separators, so both are accepted here and validated in
+    /// `NumberNode::new`, which is also where Go decides whether a literal is legal.
     fn scan_number(&mut self) -> bool {
+        const DECIMAL: &str = "0123456789_";
+        const HEXADECIMAL: &str = "0123456789abcdefABCDEF_";
+        const OCTAL: &str = "01234567_";
+        const BINARY: &str = "01_";
+
         self.accept("+-");
-        if self.accept("0") && self.accept("xX") {
-            let digits = "0123456789abcdefABCDEF";
-            self.accept_run(digits);
-        } else {
-            let digits = "0123456789";
-            self.accept_run(digits);
-            if self.accept(".") {
-                self.accept_run(digits);
-            }
-            if self.accept("eE") {
-                self.accept("+-");
-                self.accept_run(digits);
+
+        let mut digits = DECIMAL;
+        if self.accept("0") {
+            // A leading zero is an octal prefix for an integer but not for a float,
+            // so the decimal set stays until a prefix letter says otherwise.
+            if self.accept("xX") {
+                digits = HEXADECIMAL;
+            } else if self.accept("oO") {
+                digits = OCTAL;
+            } else if self.accept("bB") {
+                digits = BINARY;
             }
         }
+        self.accept_run(digits);
+
+        if self.accept(".") {
+            self.accept_run(digits);
+        }
+        if digits == DECIMAL && self.accept("eE") {
+            self.accept("+-");
+            self.accept_run(DECIMAL);
+        }
+        // Go also takes a `p` exponent on a hexadecimal float. Scanning one here
+        // without being able to evaluate it would only turn a clear lexer error into
+        // a confusing parse error, so it stays unsupported on both sides.
         // Let's ignore imaginary numbers for now.
-        if self.peek().map(|c| c.is_alphanumeric()).unwrap_or(true) {
+        //
+        // End of input ends the number, as in Go: treating it as another character
+        // reports a bad number where the real problem is the missing `}}`.
+        if self.peek().map(|c| c.is_alphanumeric()).unwrap_or(false) {
             self.next();
             return false;
         }
@@ -701,9 +703,7 @@ impl LexerStateMachine {
     }
 
     fn lex_raw_quote(&mut self) -> State {
-        let start_line = self.line;
         if !self.any(|c| c == '`') {
-            self.line = start_line;
             return self.errorf("unterminated raw quoted string");
         }
         self.emit(ItemType::ItemRawString);
@@ -711,16 +711,21 @@ impl LexerStateMachine {
     }
 }
 
+/// Byte length of the trailing run of whitespace in `s`.
+///
+/// Measured from the *end* of the last non-space character. Measuring from its start
+/// and adding one assumes every character is a single byte, which puts the trim
+/// position inside a multi-byte character and panics the next slice.
 fn rtrim_len(s: &str) -> usize {
-    match s.rfind(|c: char| !c.is_whitespace()) {
-        Some(i) => s.len() - 1 - i,
+    match s.char_indices().rev().find(|(_, c)| !is_space(*c)) {
+        Some((index, c)) => s.len() - (index + c.len_utf8()),
         None => s.len(),
     }
 }
 
+/// Byte length of the leading run of whitespace in `s`.
 fn ltrim_len(s: &str) -> usize {
-    let l = s.len();
-    s.find(|c: char| !c.is_whitespace()).unwrap_or(l)
+    s.find(|c: char| !is_space(c)).unwrap_or(s.len())
 }
 
 #[cfg(test)]

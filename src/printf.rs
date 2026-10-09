@@ -82,13 +82,13 @@ fn process_verb(
                 index += 1;
                 i
             });
-            if let Some(width) = args.get(arg_num).and_then(|v| i64::from_value(v)) {
+            if let Some(width) = args.get(arg_num).and_then(i64::from_value) {
                 if width < 0 {
                     params.minus = true;
                     // Golang does not pad with zeros to the right.
                     params.zero = false;
                 }
-                params.width = width.abs() as usize;
+                params.width = width.unsigned_abs() as usize;
             }
             after_index = false;
         } else if let Some((width, till)) = parse_num(&s[pos..])? {
@@ -118,11 +118,11 @@ fn process_verb(
                     index += 1;
                     i
                 });
-                if let Some(prec) = args.get(arg_num).and_then(|v| i64::from_value(v)) {
+                if let Some(prec) = args.get(arg_num).and_then(i64::from_value) {
                     if prec < 0 {
                         params.precision = None;
                     }
-                    params.precision = Some(prec.abs() as usize);
+                    params.precision = Some(prec.unsigned_abs() as usize);
                 }
             } else if let Some((prec, till)) = parse_num(&s[pos..])? {
                 if after_index {
@@ -164,7 +164,7 @@ fn parse_index(s: &str) -> Result<Option<(usize, usize)>, PrintError> {
 }
 
 fn parse_num(s: &str) -> Result<Option<(usize, usize)>, PrintError> {
-    let till = s.find(|c: char| !c.is_digit(10)).unwrap_or_else(|| s.len());
+    let till = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     if till > 0 {
         s[..till]
             .parse()

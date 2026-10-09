@@ -284,7 +284,7 @@ pub fn compact(args: &[Value]) -> Result<Value, FuncError> {
         Value::Array(arr) => {
             let result: Vec<Value> = arr
                 .iter()
-                .filter(|item| !matches!(item, Value::Nil | Value::NoValue))
+                .filter(|item| !crate::utils::is_absent_or_nil(item))
                 .cloned()
                 .collect();
             Ok(Value::Array(result))

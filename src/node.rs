@@ -109,6 +109,36 @@ nodes!(
 
 pub type Pos = usize;
 
+/// Where a node sits in its template source.
+///
+/// A node starts at its first token but ends with its last child, so the span is
+/// assembled while parsing and handed to the constructor once it is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeSpan {
+    pub tree: TreeId,
+    pub pos: Pos,
+    pub line: usize,
+    pub col: usize,
+    pub len: usize,
+}
+
+impl NodeSpan {
+    /// A span from an explicit position and length.
+    ///
+    /// Usually that is one lexer token, but it is also how an already-known span is
+    /// repackaged -- a control's span taken from its pipeline, say, which covers as
+    /// many tokens as the pipeline does.
+    pub fn at(tree: TreeId, pos: Pos, line: usize, col: usize, len: usize) -> NodeSpan {
+        NodeSpan {
+            tree,
+            pos,
+            line,
+            col,
+            len,
+        }
+    }
+}
+
 pub type TreeId = usize;
 
 pub trait Node: Display {
@@ -134,15 +164,6 @@ macro_rules! node {
             len: usize,
             tr: TreeId,
             $(pub $field: $typ,)*
-        }
-        impl $name {
-            /// Widens this node's recorded source span once its extent is known. A
-            /// node that is built incrementally cannot know its span at construction
-            /// time: it ends at the last token the node consumes, which is only
-            /// reached after its children are parsed.
-            pub fn set_len(&mut self, len: usize) {
-                self.len = len;
-            }
         }
         impl Node for $name {
             fn typ(&self) -> &NodeType {
@@ -218,9 +239,7 @@ impl ListNode {
 impl Display for ListNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         for n in &self.nodes {
-            if let Err(e) = n.fmt(f) {
-                return Err(e);
-            }
+            n.fmt(f)?;
         }
         Ok(())
     }
@@ -264,6 +283,18 @@ node!(
 );
 
 impl PipeNode {
+    /// Moves the node onto a wider span, for a term whose written form extends past
+    /// the node itself: the parentheses of a parenthesised pipeline belong to the term
+    /// but not to the pipeline inside them, and a chain built on that term has to
+    /// measure from the opening one.
+    pub fn reanchor(mut self, span: NodeSpan) -> Self {
+        self.pos = span.pos;
+        self.line = span.line;
+        self.col = span.col;
+        self.len = span.len;
+        self
+    }
+
     pub fn new(
         tr: TreeId,
         pos: Pos,
@@ -390,36 +421,17 @@ impl Display for CommandNode {
 node!(IdentifierNode { ident: String });
 
 impl IdentifierNode {
-    pub fn new(ident: String) -> IdentifierNode {
+    /// An identifier at a known location.
+    pub fn at(span: NodeSpan, ident: String) -> IdentifierNode {
         IdentifierNode {
             typ: NodeType::Identifier,
-            tr: 0,
-            pos: 0,
-            line: 0,
-            col: 0,
-            len: 0,
+            tr: span.tree,
+            pos: span.pos,
+            line: span.line,
+            col: span.col,
+            len: span.len,
             ident,
         }
-    }
-
-    pub fn set_pos(&mut self, pos: Pos) -> &IdentifierNode {
-        self.pos = pos;
-        self
-    }
-
-    pub fn set_line(&mut self, line: usize) -> &IdentifierNode {
-        self.line = line;
-        self
-    }
-
-    pub fn set_col(&mut self, col: usize) -> &IdentifierNode {
-        self.col = col;
-        self
-    }
-
-    pub fn set_tree(&mut self, tr: TreeId) -> &IdentifierNode {
-        self.tr = tr;
-        self
     }
 }
 
@@ -582,16 +594,10 @@ impl ChainNode {
 
 impl Display for ChainNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        if let Err(e) = {
-            // Handle PipeNode.
-            write!(f, "{}", self.node)
-        } {
-            return Err(e);
-        }
+        // Handle PipeNode.
+        write!(f, "{}", self.node)?;
         for field in &self.field {
-            if let Err(e) = write!(f, ".{}", field) {
-                return Err(e);
-            }
+            write!(f, ".{}", field)?;
         }
         Ok(())
     }
@@ -619,22 +625,136 @@ impl Display for BoolNode {
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum NumberType {
-    U64,
-    I64,
-    Float,
-    Char,
-}
-
 node!(NumberNode {
-    is_i64: bool,
-    is_u64: bool,
-    is_f64: bool,
     text: String,
-    number_typ: NumberType,
     value: Value,
 });
+
+/// A numeric literal, classified the way Go's `strconv.ParseInt(text, 0, 64)` does.
+enum IntegerLiteral {
+    /// A legal integer literal, split into the parts `from_str_radix` needs.
+    Legal {
+        negative: bool,
+        digits: String,
+        radix: u32,
+    },
+    /// Not an integer literal at all, so the floating point syntax should be tried.
+    NotInteger,
+    /// Shaped like an integer literal but not a legal one.
+    Malformed,
+}
+
+/// Removes Go's `_` separators from a run of digits.
+///
+/// Go requires every separator to sit between two digits, with one extra allowed
+/// directly after a base prefix, so `1_000` and `0x_ff` are legal while `_1`, `1_`
+/// and `1__0` are not.
+fn strip_digit_separators(digits: &str, after_base_prefix: bool) -> Option<String> {
+    if digits.contains("__") || digits.ends_with('_') {
+        return None;
+    }
+    if digits.starts_with('_') && !after_base_prefix {
+        return None;
+    }
+    let stripped: String = digits.chars().filter(|c| *c != '_').collect();
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped)
+    }
+}
+
+/// Removes `_` separators from a decimal or floating point literal, rejecting any
+/// that does not sit between two digits.
+///
+/// The integer path can get away with simpler rules because its text is all digits
+/// after the prefix; a float also contains `.`, `e` and a sign, so the neighbours
+/// have to be checked directly. Go accepts `1_0.5` but not `1._5`, `1.5_` or `1e_3`.
+fn strip_float_separators(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'_' {
+            continue;
+        }
+        let before = index.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(index + 1).copied();
+        if !matches!((before, after), (Some(b'0'..=b'9'), Some(b'0'..=b'9'))) {
+            return None;
+        }
+    }
+    Some(text.chars().filter(|c| *c != '_').collect())
+}
+
+/// Classifies `text` as a Go integer literal.
+///
+/// Rust's `from_str_radix` takes neither a base prefix nor `_` separators, so the
+/// prefix is resolved and the separators are checked and removed here. A bare leading
+/// zero means octal for an integer but not for a float, which is why `0.5` and `0e1`
+/// come back as `NotInteger` while `017` is octal and `08` is malformed.
+fn classify_integer_literal(text: &str) -> IntegerLiteral {
+    let (negative, body) = match text.chars().next() {
+        Some('-') => (true, &text[1..]),
+        Some('+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    if body.is_empty() {
+        return IntegerLiteral::Malformed;
+    }
+
+    let prefixed = body
+        .strip_prefix('0')
+        .and_then(|rest| match rest.chars().next() {
+            Some('x') | Some('X') => Some((16, &rest[1..])),
+            Some('o') | Some('O') => Some((8, &rest[1..])),
+            Some('b') | Some('B') => Some((2, &rest[1..])),
+            _ => None,
+        });
+
+    if let Some((radix, digits)) = prefixed {
+        return match strip_digit_separators(digits, true) {
+            Some(digits) if digits.chars().all(|c| c.is_digit(radix)) => IntegerLiteral::Legal {
+                negative,
+                digits,
+                radix,
+            },
+            _ => IntegerLiteral::Malformed,
+        };
+    }
+
+    // A fraction or an exponent makes this a float, whatever the leading digit is.
+    if body.contains(['.', 'e', 'E']) {
+        return IntegerLiteral::NotInteger;
+    }
+
+    let digits = match strip_digit_separators(body, false) {
+        Some(digits) => digits,
+        None => return IntegerLiteral::Malformed,
+    };
+
+    if let Some(octal) = digits.strip_prefix('0') {
+        if !octal.is_empty() {
+            return if octal.chars().all(|c| c.is_digit(8)) {
+                IntegerLiteral::Legal {
+                    negative,
+                    digits: octal.to_owned(),
+                    radix: 8,
+                }
+            } else {
+                IntegerLiteral::Malformed
+            };
+        }
+    }
+
+    if digits.chars().all(|c| c.is_ascii_digit()) {
+        IntegerLiteral::Legal {
+            negative,
+            digits,
+            radix: 10,
+        }
+    } else {
+        IntegerLiteral::Malformed
+    }
+}
 
 impl NumberNode {
     #[allow(clippy::float_cmp)]
@@ -656,56 +776,75 @@ impl NumberNode {
                     line,
                     col,
                     len,
-                    is_i64: true,
-                    is_u64: true,
-                    is_f64: true,
                     text,
-                    number_typ: NumberType::Char,
                     value: Value::from(c as u64),
                 })
                 .ok_or(NodeError::UnquoteError),
             _ => {
-                let mut number_typ = NumberType::Float;
+                // Mirrors Go's `newNumber`: read it as an integer first so a base
+                // prefix is honoured, and fall back to the float syntax only when no
+                // integer reading applies.
+                let mut as_i64 = 0i64;
+                let mut as_u64 = 0u64;
+                let mut is_i64 = false;
+                let mut is_u64 = false;
 
-                // TODO: Deal with hex.
-                let (mut as_i64, mut is_i64) = text
-                    .parse::<i64>()
-                    .map(|i| (i, true))
-                    .unwrap_or((0i64, false));
-
-                if is_i64 {
-                    number_typ = NumberType::I64;
-                }
-
-                let (mut as_u64, mut is_u64) = text
-                    .parse::<u64>()
-                    .map(|i| (i, true))
-                    .unwrap_or((0u64, false));
-
-                if is_u64 {
-                    number_typ = NumberType::U64;
-                }
-
-                if is_i64 && as_i64 == 0 {
-                    // In case of -0.
-                    as_u64 = 0;
-                    is_u64 = true;
-                }
-
-                let (as_f64, is_f64) = match text.parse::<f64>() {
-                    Err(_) => (0.0_f64, false),
-                    Ok(f) => {
-                        let frac = text.contains(|c| {
-                            matches! {
-                            c, '.' | 'e' | 'E' }
-                        });
-                        if frac {
-                            (f, true)
+                match classify_integer_literal(&text) {
+                    IntegerLiteral::Malformed => return Err(NodeError::NaN),
+                    IntegerLiteral::Legal {
+                        negative,
+                        digits,
+                        radix,
+                    } => {
+                        if !negative {
+                            if let Ok(parsed) = u64::from_str_radix(&digits, radix) {
+                                as_u64 = parsed;
+                                is_u64 = true;
+                            }
+                        }
+                        let signed = if negative {
+                            format!("-{}", digits)
                         } else {
-                            (f, false)
+                            digits
+                        };
+                        if let Ok(parsed) = i64::from_str_radix(&signed, radix) {
+                            as_i64 = parsed;
+                            is_i64 = true;
+                            if parsed == 0 {
+                                // In case of -0.
+                                as_u64 = 0;
+                                is_u64 = true;
+                            }
+                        }
+                        if !is_i64 && !is_u64 {
+                            // Too large for either, which Go reports as an overflow.
+                            return Err(NodeError::NaN);
                         }
                     }
+                    IntegerLiteral::NotInteger => {}
+                }
+
+                // An integer reading is promoted to a float as well, as Go does, so a
+                // later whole-float check has something to compare against.
+                let as_f64 = if is_i64 || is_u64 {
+                    if is_i64 {
+                        as_i64 as f64
+                    } else {
+                        as_u64 as f64
+                    }
+                } else {
+                    let stripped = match strip_float_separators(&text) {
+                        Some(stripped) => stripped,
+                        None => return Err(NodeError::NaN),
+                    };
+                    match stripped.parse::<f64>() {
+                        Ok(parsed) => parsed,
+                        Err(_) => return Err(NodeError::NaN),
+                    }
                 };
+
+                // A whole float still reads as an integer, so `{{ 1e3 }}` renders
+                // `1000` rather than `1000.0`.
                 if !is_i64 && ((as_f64 as i64) as f64) == as_f64 {
                     as_i64 = as_f64 as i64;
                     is_i64 = true;
@@ -713,9 +852,6 @@ impl NumberNode {
                 if !is_u64 && ((as_f64 as u64) as f64) == as_f64 {
                     as_u64 = as_f64 as u64;
                     is_u64 = true;
-                }
-                if !is_u64 && !is_i64 && !is_f64 {
-                    return Err(NodeError::NaN);
                 }
 
                 let value = if is_u64 {
@@ -733,17 +869,35 @@ impl NumberNode {
                     line,
                     col,
                     len,
-                    is_i64,
-                    is_u64,
-                    is_f64,
                     text,
-                    number_typ,
                     value,
                 })
             }
         }
     }
 }
+
+/// Gives a node type a one-shot `finish`, for the types that are built by appending
+/// and therefore only learn their extent once their children are parsed.
+macro_rules! finishable {
+    ($($name:ident)*) => {
+        $(
+            impl $name {
+                /// Records the span now that the children are parsed and the extent
+                /// is known. Consuming `self` makes this a step in building the node
+                /// rather than a mutation that could be repeated, forgotten, or
+                /// applied at the wrong moment.
+                pub fn finish(mut self, end: Pos) -> Self {
+                    debug_assert!(end >= self.pos, "node ends before it starts");
+                    self.len = end - self.pos;
+                    self
+                }
+            }
+        )*
+    };
+}
+
+finishable!(ListNode PipeNode CommandNode ChainNode);
 
 impl Display for NumberNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
@@ -841,22 +995,18 @@ pub type RangeNode = BranchNode;
 
 impl BranchNode {
     pub fn new_if(
-        tr: TreeId,
-        pos: Pos,
-        line: usize,
-        col: usize,
-        len: usize,
+        span: NodeSpan,
         pipe: PipeNode,
         list: ListNode,
         else_list: Option<ListNode>,
     ) -> IfNode {
         IfNode {
             typ: NodeType::If,
-            tr,
-            pos,
-            line,
-            col,
-            len,
+            tr: span.tree,
+            pos: span.pos,
+            line: span.line,
+            col: span.col,
+            len: span.len,
             pipe,
             list,
             else_list,
@@ -864,22 +1014,18 @@ impl BranchNode {
     }
 
     pub fn new_with(
-        tr: TreeId,
-        pos: Pos,
-        line: usize,
-        col: usize,
-        len: usize,
+        span: NodeSpan,
         pipe: PipeNode,
         list: ListNode,
         else_list: Option<ListNode>,
     ) -> WithNode {
         WithNode {
             typ: NodeType::With,
-            tr,
-            pos,
-            line,
-            col,
-            len,
+            tr: span.tree,
+            pos: span.pos,
+            line: span.line,
+            col: span.col,
+            len: span.len,
             pipe,
             list,
             else_list,
@@ -887,22 +1033,18 @@ impl BranchNode {
     }
 
     pub fn new_range(
-        tr: TreeId,
-        pos: Pos,
-        line: usize,
-        col: usize,
-        len: usize,
+        span: NodeSpan,
         pipe: PipeNode,
         list: ListNode,
         else_list: Option<ListNode>,
     ) -> RangeNode {
         RangeNode {
             typ: NodeType::Range,
-            tr,
-            pos,
-            line,
-            col,
-            len,
+            tr: span.tree,
+            pos: span.pos,
+            line: span.line,
+            col: span.col,
+            len: span.len,
             pipe,
             list,
             else_list,

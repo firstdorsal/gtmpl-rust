@@ -13,6 +13,7 @@ use gtmpl_ng::Value;
 fn fixture() -> Value {
     let mut root = HashMap::new();
     root.insert("a".to_owned(), Value::from("A"));
+    root.insert("b".to_owned(), Value::from("B"));
     root.insert("n".to_owned(), Value::from(7));
     root.insert("l".to_owned(), Value::from(vec![1, 2]));
     Value::Map(root)
@@ -36,6 +37,49 @@ fn trimming_is_independent_of_the_amount_of_whitespace() {
         "x\n{{-  .a  -}}\ny",
     ] {
         assert_eq!(render(source).as_deref(), Ok("xAy"), "{}", source);
+    }
+}
+
+/// The marker is recognised after any whitespace Go counts as such, not only a space.
+#[test]
+fn trimming_works_after_a_tab_or_newline() {
+    for source in [
+        "x{{-\t.a\t-}}y",
+        "x{{-\t\t.a\t\t-}}y",
+        "x{{-\n.a\n-}}y",
+        "x{{-\r\n.a\r\n-}}y",
+        "x{{- .a\t-}}y",
+        "x{{-\t.a -}}y",
+        "x{{.a\t-}}y",
+        "x{{-\t.a}}y",
+    ] {
+        assert_eq!(render(source).as_deref(), Ok("xAy"), "{:?}", source);
+    }
+}
+
+/// An action may span lines, as in Go. Only running out of input is unclosed.
+#[test]
+fn an_action_may_span_lines() {
+    assert_eq!(render("{{\n.a\n}}").as_deref(), Ok("A"));
+    assert_eq!(render("{{ .a\n}}").as_deref(), Ok("A"));
+    assert_eq!(render("{{\n\n.a }}").as_deref(), Ok("A"));
+    assert_eq!(
+        render("{{ printf \"%s%s\"\n   .a\n   .b }}").as_deref(),
+        Ok("AB")
+    );
+    assert_eq!(render("{{ if\n.a\n}}yes{{ end }}").as_deref(), Ok("yes"));
+
+    // Running out of input is an unclosed action, whatever the last token was. These
+    // used to report a bad character instead, with a NUL byte in the message, and an
+    // `is_err()` assertion could not tell the difference.
+    for source in ["{{ .a", "{{.a", "{{ printf", "{{ .a\n", "{{ 1"] {
+        let error = render(source).expect_err("should not parse");
+        assert!(
+            error.contains("unclosed action"),
+            "{:?} gave {:?}",
+            source,
+            error
+        );
     }
 }
 
