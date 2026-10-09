@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
+mod common;
+
 use gtmpl_ng::{Context, Template, Value};
 
 fn render(source: &str, context: impl Into<Value>) -> String {
-    let mut template = Template::default();
-    template.parse(source).unwrap();
-    template.render(&Context::from(context)).unwrap()
+    common::render(source, context.into()).expect("template renders")
 }
 
 #[test]
@@ -104,5 +104,25 @@ fn assignment_to_an_undefined_variable_fails() {
     let mut template = Template::default();
     template.parse("{{ $missing = 1 }}").unwrap();
     let error = template.render(&Context::empty()).unwrap_err();
-    assert!(error.to_string().contains("missing"));
+    // Assert the specific failure, not just that "missing" appears somewhere: a
+    // different error class mentioning the word would otherwise pass.
+    let message = match error {
+        gtmpl_ng::ExecError::Structured(ref structured) => structured.message.clone(),
+        other => panic!("expected a structured error, got {:?}", other),
+    };
+    assert_eq!(message, "variable $missing not found");
+}
+
+/// Go lets `$` itself be reassigned, and the new value outlives the scope that
+/// assigned it.
+#[test]
+fn the_root_variable_can_be_reassigned() {
+    assert_eq!(render("{{ $ = 5 }}{{ $ }}", "ignored"), "5");
+    assert_eq!(render("{{ $x := 1 }}{{ $ = 5 }}{{ $ }}", "ignored"), "5");
+    assert_eq!(render("{{ $ := 5 }}{{ $ }}", "ignored"), "5");
+    // assigned inside a loop, read after it
+    assert_eq!(
+        render("{{ range . }}{{ $ = . }}{{ end }}{{ $ }}", vec![1, 2, 3]),
+        "3"
+    );
 }

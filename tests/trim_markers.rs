@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use gtmpl_ng::{Context, Template, Value};
+mod common;
+
+use gtmpl_ng::Value;
 
 fn fixture() -> Value {
     let mut root = HashMap::new();
@@ -17,11 +19,7 @@ fn fixture() -> Value {
 }
 
 fn render(source: &str) -> Result<String, String> {
-    let mut template = Template::default();
-    template.parse(source).map_err(|e| e.to_string())?;
-    template
-        .render(&Context::from(fixture()))
-        .map_err(|e| e.to_string())
+    common::render(source, fixture())
 }
 
 /// Any number of spaces around the markers trims to the same result.

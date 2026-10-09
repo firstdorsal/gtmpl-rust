@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+mod common;
+
 use gtmpl_ng::{Context, Func, FuncError, Template, Value};
 
 fn fixture() -> Value {
@@ -43,11 +45,7 @@ fn fixture() -> Value {
 }
 
 fn render(source: &str) -> Result<String, String> {
-    let mut template = Template::default();
-    template.parse(source).map_err(|e| e.to_string())?;
-    template
-        .render(&Context::from(fixture()))
-        .map_err(|e| e.to_string())
+    common::render(source, fixture())
 }
 
 /// A chain rooted at a variable must resolve the same value as the equivalent

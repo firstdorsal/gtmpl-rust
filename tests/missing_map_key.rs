@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 
-use gtmpl_ng::{Context, Template, Value};
+mod common;
+
+use gtmpl_ng::Value;
 
 fn fixture() -> Value {
     let mut inner = HashMap::new();
@@ -26,11 +28,7 @@ fn fixture() -> Value {
 }
 
 fn render(source: &str) -> Result<String, String> {
-    let mut template = Template::default();
-    template.parse(source).map_err(|e| e.to_string())?;
-    template
-        .render(&Context::from(fixture()))
-        .map_err(|e| e.to_string())
+    common::render(source, fixture())
 }
 
 #[test]
@@ -82,6 +80,32 @@ fn a_missing_key_is_falsy_and_empty() {
         render("{{range .emptyMap.missing}}y{{else}}n{{end}}").as_deref(),
         Ok("n")
     );
+}
+
+/// An absent receiver has no fields and no methods, so a call with arguments on it
+/// is `<no value>` too -- the argument check must not fire first.
+#[test]
+fn an_absent_receiver_answers_before_the_argument_check() {
+    for source in [
+        r#"{{.emptyMap.missing.deeper "x"}}"#,
+        r#"{{$x := .emptyMap.missing}}{{$x.deeper "x"}}"#,
+        r#"{{.missingTop.deeper "x"}}"#,
+    ] {
+        assert_eq!(render(source).as_deref(), Ok("<no value>"), "{}", source);
+    }
+}
+
+/// But a *present* receiver whose field is missing is still an error when called
+/// with arguments, because the field genuinely is not a method.
+#[test]
+fn a_present_receiver_with_arguments_still_errors() {
+    for source in [
+        r#"{{.emptyMap.missing "x"}}"#,
+        r#"{{.nested.nope "x"}}"#,
+        r#"{{.scalar.nope "x"}}"#,
+    ] {
+        assert!(render(source).is_err(), "{} should fail", source);
+    }
 }
 
 /// A receiver that is not a map or object is still an error -- the short-circuit must

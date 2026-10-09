@@ -15,15 +15,48 @@ struct Variable {
     value: Value,
 }
 
-/// Outcome of walking a field chain through borrowed values.
+/// How a single `Value` answers a field lookup. This is the one place that decides
+/// it, so the borrowing walk and the invoking walk cannot drift apart.
+enum FieldOutcome<'v> {
+    /// The field is present and holds this value.
+    Found(&'v Value),
+    /// The receiver is absent, or a map that has no such key. Go produces an invalid
+    /// value here and every further field access on it stays invalid, however deep,
+    /// so this ends the chain and renders as `<no value>`.
+    Absent,
+}
+
+/// Resolves one field of one receiver. A struct-like receiver must have the field; a
+/// map need not; anything else cannot have fields at all.
+fn resolve_field<'v>(receiver: &'v Value, field_name: &str) -> Result<FieldOutcome<'v>, ExecError> {
+    match receiver {
+        Value::Object(object) => match object.get(field_name) {
+            Some(field) => Ok(FieldOutcome::Found(field)),
+            None => Err(ExecError::NoFieldFor(
+                field_name.to_string(),
+                receiver.clone(),
+            )),
+        },
+        Value::Map(map) => match map.get(field_name) {
+            Some(field) => Ok(FieldOutcome::Found(field)),
+            None => Ok(FieldOutcome::Absent),
+        },
+        // Reached when an earlier miss was carried here, possibly through a variable.
+        Value::NoValue => Ok(FieldOutcome::Absent),
+        _ => Err(ExecError::OnlyMapsAndObjectsHaveFields),
+    }
+}
+
+/// Outcome of walking a whole field chain through borrowed values.
 enum ChainLookup<'v> {
     /// The chain resolved to this value; only the final value has to be cloned.
     Found(&'v Value),
-    /// A map lookup missed on the last element, which renders as `<no value>`.
+    /// The chain ran into an absent receiver and ends as `<no value>`.
     NoValue,
-    /// The chain reached a function-valued field. The caller has to re-walk the
-    /// chain through `eval_field`, which invokes it with its receiver.
-    Function,
+    /// The chain reached a function-valued field, which only `eval_field` may
+    /// invoke. `at` is how many fields were already resolved, so the caller can
+    /// resume there instead of walking the prefix again.
+    Function { at: usize },
 }
 
 /// Walks a field chain without cloning the intermediate values. Resolving a field is
@@ -35,25 +68,14 @@ fn lookup_field_chain<'v>(
 ) -> Result<ChainLookup<'v>, ExecError> {
     let mut value = receiver;
 
-    for field_name in ident {
-        let field = match value {
-            Value::Object(object) => match object.get(field_name) {
-                Some(field) => field,
-                None => return Err(ExecError::NoFieldFor(field_name.to_string(), value.clone())),
-            },
-            // A missing key ends the chain: Go yields an invalid value here and
-            // every further field access on it stays invalid, however deep.
-            Value::Map(map) => match map.get(field_name) {
-                Some(field) => field,
-                None => return Ok(ChainLookup::NoValue),
-            },
-            // Reached when a missed lookup was carried here through a variable.
-            Value::NoValue => return Ok(ChainLookup::NoValue),
-            _ => return Err(ExecError::OnlyMapsAndObjectsHaveFields),
+    for (index, field_name) in ident.iter().enumerate() {
+        let field = match resolve_field(value, field_name)? {
+            FieldOutcome::Found(field) => field,
+            FieldOutcome::Absent => return Ok(ChainLookup::NoValue),
         };
 
         if matches!(field, Value::Function(_)) {
-            return Ok(ChainLookup::Function);
+            return Ok(ChainLookup::Function { at: index });
         }
         value = field;
     }
@@ -142,6 +164,21 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                 }
             }
         }
+
+        // `$` is not kept in the stack -- it is read straight off the root -- but Go
+        // allows reassigning it, and the new value has to outlive the scope doing the
+        // assignment. Binding it in the outermost scope gives exactly that: later
+        // lookups find it before falling back to the root, and it survives every pop.
+        if name == "$" {
+            if let Some(outermost) = self.vars.front_mut() {
+                outermost.push_front(Variable {
+                    name: name.to_owned(),
+                    value,
+                });
+                return Ok(());
+            }
+        }
+
         Err(ExecError::VariableNotFound(name.to_owned()))
     }
 
@@ -386,21 +423,56 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             return Err(ExecError::FieldChainWithoutFields);
         }
 
+        // Only `eval_field` may invoke a function-valued field, and a call with
+        // arguments has to go through it as well. Everything else is a pure lookup
+        // that the borrowing walk can answer without cloning anything but the result.
         if args.len() <= 1 && fin.is_none() {
             match lookup_field_chain(receiver, ident)? {
                 ChainLookup::Found(value) => return Ok(value.clone()),
                 ChainLookup::NoValue => return Ok(Value::NoValue),
-                // Fall through to `eval_field`, which invokes the function it finds.
-                ChainLookup::Function => {}
+                ChainLookup::Function { at } => {
+                    return self.invoke_chain(receiver, ident, at, args, fin)
+                }
             }
         }
 
-        // TODO clean shit up
-        let mut r: Value = Value::from(0);
-        for (i, id) in ident.iter().enumerate().take(n - 1) {
-            r = self.eval_field(if i == 0 { receiver } else { &r }, id, &[], &None)?;
+        self.invoke_chain(receiver, ident, 0, args, fin)
+    }
+
+    /// Walks a field chain through `eval_field`, which is the only place allowed to
+    /// invoke a function-valued field and therefore needs each receiver owned.
+    ///
+    /// `from` is the index of the first field that actually needs that treatment.
+    /// Everything before it was already resolved by the borrowing walk and is known
+    /// to be function-free, so it is resolved by reference here too rather than
+    /// cloned step by step.
+    fn invoke_chain(
+        &mut self,
+        receiver: &Value,
+        ident: &[String],
+        from: usize,
+        args: &[Nodes],
+        fin: &Option<Value>,
+    ) -> Result<Value, ExecError> {
+        let n = ident.len();
+
+        let mut borrowed = receiver;
+        for field_name in ident.iter().take(from) {
+            match resolve_field(borrowed, field_name)? {
+                FieldOutcome::Found(field) => borrowed = field,
+                FieldOutcome::Absent => return Ok(Value::NoValue),
+            }
         }
-        self.eval_field(if n == 1 { receiver } else { &r }, &ident[n - 1], args, fin)
+
+        if from + 1 >= n {
+            return self.eval_field(borrowed, &ident[n - 1], args, fin);
+        }
+
+        let mut owned = self.eval_field(borrowed, &ident[from], &[], &None)?;
+        for field_name in ident.iter().take(n - 1).skip(from + 1) {
+            owned = self.eval_field(&owned, field_name, &[], &None)?;
+        }
+        self.eval_field(&owned, &ident[n - 1], args, fin)
     }
 
     fn eval_field(
@@ -410,23 +482,23 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         args: &[Nodes],
         fin: &Option<Value>,
     ) -> Result<Value, ExecError> {
-        let has_args = args.len() > 1 || fin.is_some();
-        if has_args {
+        // An absent receiver answers before the argument check, as Go does: it has no
+        // fields and no methods, so `{{.map.missing.deeper "x"}}` is `<no value>`
+        // rather than "cannot be invoked as function".
+        if matches!(receiver, Value::NoValue) {
+            return Ok(Value::NoValue);
+        }
+        if args.len() > 1 || fin.is_some() {
             return Err(ExecError::NotAFunctionButArguments(field_name.to_string()));
         }
-        let ret = match *receiver {
-            Value::Object(ref o) => o
-                .get(field_name)
-                .cloned()
-                .ok_or_else(|| ExecError::NoFieldFor(field_name.to_string(), receiver.clone())),
-            Value::Map(ref o) => Ok(o.get(field_name).cloned().unwrap_or(Value::NoValue)),
-            Value::NoValue => Ok(Value::NoValue),
-            _ => Err(ExecError::OnlyMapsAndObjectsHaveFields),
-        };
-        if let Ok(Value::Function(ref f)) = ret {
-            return (f.f)(&[receiver.clone()]).map_err(Into::into);
+
+        match resolve_field(receiver, field_name)? {
+            FieldOutcome::Found(Value::Function(f)) => {
+                (f.f)(&[receiver.clone()]).map_err(Into::into)
+            }
+            FieldOutcome::Found(field) => Ok(field.clone()),
+            FieldOutcome::Absent => Ok(Value::NoValue),
         }
-        ret
     }
 
     fn eval_variable_node(
@@ -444,22 +516,17 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         // Walk `$var.a.b` straight out of the variable. Going through `var_value`
         // would clone the whole variable -- for `$` that is the entire root object --
         // only to throw away everything but the field at the end of the chain.
+        let mut resume_at = 0;
         if args.len() <= 1 && fin.is_none() {
-            let fast = match lookup_field_chain(
-                self.var_ref(&variable.ident[0])?,
-                &variable.ident[1..],
-            )? {
-                ChainLookup::Found(value) => Some(value.clone()),
-                ChainLookup::NoValue => Some(Value::NoValue),
-                ChainLookup::Function => None,
-            };
-            if let Some(value) = fast {
-                return Ok(value);
+            match lookup_field_chain(self.var_ref(&variable.ident[0])?, &variable.ident[1..])? {
+                ChainLookup::Found(value) => return Ok(value.clone()),
+                ChainLookup::NoValue => return Ok(Value::NoValue),
+                ChainLookup::Function { at } => resume_at = at,
             }
         }
 
         let val = self.var_value(&variable.ident[0])?;
-        self.eval_field_chain(&val, &variable.ident[1..], args, fin)
+        self.invoke_chain(&val, &variable.ident[1..], resume_at, args, fin)
     }
 
     // Walks an `if` or `with` node. They behave the same, except that `with` sets dot.
@@ -851,12 +918,6 @@ mod tests_mocked {
         assert_eq!(String::from_utf8(w).unwrap(), "1000");
     }
 
-    fn to_sorted_string(buf: Vec<u8>) -> String {
-        let mut chars: Vec<char> = String::from_utf8(buf).unwrap().chars().collect();
-        chars.sort_unstable();
-        chars.iter().cloned().collect::<String>()
-    }
-
     #[test]
     fn test_range() {
         let mut map = HashMap::new();
@@ -868,7 +929,7 @@ mod tests_mocked {
         assert!(t.parse(r#"{{ range . -}} {{.}} {{- end }}"#).is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12");
+        assert_eq!(String::from_utf8(w).unwrap(), "12");
 
         let vec = vec!["foo", "bar", "2000"];
         let data = Context::from(vec);
@@ -904,7 +965,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12");
+        assert_eq!(String::from_utf8(w).unwrap(), "12");
 
         let mut map = HashMap::new();
         map.insert("a".to_owned(), "b");
@@ -917,7 +978,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "abcd");
+        assert_eq!(String::from_utf8(w).unwrap(), "abcd");
 
         let mut map = HashMap::new();
         map.insert("a".to_owned(), 1);
@@ -930,7 +991,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12ab");
+        assert_eq!(String::from_utf8(w).unwrap(), "a1b2");
 
         let mut map = HashMap::new();
         map.insert("a".to_owned(), 1);
@@ -948,7 +1009,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12");
+        assert_eq!(String::from_utf8(w).unwrap(), "12");
 
         let mut map = HashMap::new();
         #[derive(Gtmpl, Clone)]
@@ -965,7 +1026,7 @@ mod tests_mocked {
             .is_ok());
         let out = t.execute(&mut w, &data);
         assert!(out.is_ok());
-        assert_eq!(to_sorted_string(w), "12");
+        assert_eq!(String::from_utf8(w).unwrap(), "12");
     }
 
     #[test]
