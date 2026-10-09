@@ -573,6 +573,7 @@ impl Parser {
 
     fn pipeline(&mut self, context: &str) -> Result<PipeNode, ParseError> {
         let mut decl = vec![];
+        let mut is_assign = false;
         let mut token = self.next_non_space_must("pipeline")?;
         let pos = token.pos;
         let line = token.line;
@@ -585,6 +586,7 @@ impl Parser {
                 let next = if token_after_var.typ == ItemType::ItemSpace {
                     let next = self.next_non_space_must("variable")?;
                     if next.typ != ItemType::ItemColonEquals
+                        && next.typ != ItemType::ItemAssign
                         && !(next.typ == ItemType::ItemChar && next.val == ",")
                     {
                         self.backup3(token, token_after_var, next);
@@ -595,6 +597,7 @@ impl Parser {
                     token_after_var
                 };
                 if next.typ == ItemType::ItemColonEquals
+                    || next.typ == ItemType::ItemAssign
                     || (next.typ == ItemType::ItemChar && next.val == ",")
                 {
                     let variable = VariableNode::new(
@@ -605,6 +608,7 @@ impl Parser {
                         token.val.len(),
                         &token.val,
                     );
+                    is_assign = next.typ == ItemType::ItemAssign;
                     self.add_var(token.val.clone())?;
                     decl.push(variable);
                     if next.typ == ItemType::ItemChar && next.val == "," {
@@ -623,6 +627,7 @@ impl Parser {
             self.backup(token);
         }
         let mut pipe = PipeNode::new(self.tree_id, pos, line, col, len, decl);
+        pipe.is_assign = is_assign;
         let mut token = self.next_non_space_must("pipeline")?;
         loop {
             match token.typ {

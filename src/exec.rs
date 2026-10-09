@@ -90,16 +90,16 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         )
     }
 
-    fn set_kth_last_var_value(&mut self, k: usize, value: Value) -> Result<(), ExecError> {
-        if let Some(last_vars) = self.vars.back_mut() {
-            let i = last_vars.len() - k;
-            if let Some(kth_last_var) = last_vars.get_mut(i) {
-                kth_last_var.value = value;
-                return Ok(());
+    fn assign_var(&mut self, name: &str, value: Value) -> Result<(), ExecError> {
+        for context in self.vars.iter_mut().rev() {
+            for variable in context.iter_mut().rev() {
+                if variable.name == name {
+                    variable.value = value;
+                    return Ok(());
+                }
             }
-            return Err(ExecError::VarContextToSmall(k));
         }
-        Err(ExecError::EmptyStack)
+        Err(ExecError::VariableNotFound(name.to_owned()))
     }
 
     fn var_value(&self, key: &str) -> Result<Value, ExecError> {
@@ -198,6 +198,10 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         }
         let val = val.ok_or_else(|| ExecError::ErrorEvaluatingPipe(pipe.clone()))?;
         for var in &pipe.decl {
+            if pipe.is_assign {
+                self.assign_var(&var.ident[0], val.clone())?;
+                continue;
+            }
             self.vars
                 .back_mut()
                 .map(|v| {
@@ -387,30 +391,35 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
             Nodes::If(ref n) | Nodes::With(ref n) => &n.pipe,
             _ => return Err(ExecError::ExpectedIfOrWith(node.clone())),
         };
-        let val = self
-            .eval_pipeline(ctx, pipe)
-            .map_err(|e| self.wrap_error(e, node))?;
-        let truth = is_true(&val);
-        if truth {
-            match *node {
-                Nodes::If(ref n) => self.walk_list(ctx, &n.list)?,
-                Nodes::With(ref n) => {
-                    let ctx = Context { dot: val };
-                    self.walk_list(&ctx, &n.list)?;
-                }
-                _ => {}
-            }
-        } else {
-            match *node {
-                Nodes::If(ref n) | Nodes::With(ref n) => {
-                    if let Some(ref otherwise) = n.else_list {
-                        self.walk_list(ctx, otherwise)?;
+        self.vars.push_back(VecDeque::new());
+        let result = (|| {
+            let val = self
+                .eval_pipeline(ctx, pipe)
+                .map_err(|e| self.wrap_error(e, node))?;
+            let truth = is_true(&val);
+            if truth {
+                match *node {
+                    Nodes::If(ref n) => self.walk_list(ctx, &n.list)?,
+                    Nodes::With(ref n) => {
+                        let ctx = Context { dot: val };
+                        self.walk_list(&ctx, &n.list)?;
                     }
+                    _ => {}
                 }
-                _ => {}
+            } else {
+                match *node {
+                    Nodes::If(ref n) | Nodes::With(ref n) => {
+                        if let Some(ref otherwise) = n.else_list {
+                            self.walk_list(ctx, otherwise)?;
+                        }
+                    }
+                    _ => {}
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.vars.pop_back();
+        result
     }
 
     fn one_iteration(
@@ -419,39 +428,53 @@ impl<'a, 'b, T: Write> State<'a, 'b, T> {
         val: Value,
         range: &'a RangeNode,
     ) -> Result<(), ExecError> {
-        if !range.pipe.decl.is_empty() {
-            self.set_kth_last_var_value(1, val.clone())?;
-        }
-        if range.pipe.decl.len() > 1 {
-            self.set_kth_last_var_value(2, key)?;
+        match range.pipe.decl.as_slice() {
+            [value] => self.assign_var(&value.ident[0], val.clone())?,
+            [key_var, value] => {
+                self.assign_var(&key_var.ident[0], key)?;
+                self.assign_var(&value.ident[0], val.clone())?;
+            }
+            _ => {}
         }
         let vars = VecDeque::new();
         self.vars.push_back(vars);
         let ctx = Context { dot: val };
-        self.walk_list(&ctx, &range.list)?;
+        let result = self.walk_list(&ctx, &range.list);
         self.vars.pop_back();
-        Ok(())
+        result
     }
 
     fn walk_range(&mut self, ctx: &Context, range: &'a RangeNode) -> Result<(), ExecError> {
-        let val = self.eval_pipeline(ctx, &range.pipe)?;
-        match val {
-            Value::Object(ref map) | Value::Map(ref map) => {
-                for (k, v) in map.clone() {
-                    self.one_iteration(Value::from(k), v, range)?;
+        self.vars.push_back(VecDeque::new());
+        let result = (|| {
+            let val = self.eval_pipeline(ctx, &range.pipe)?;
+            let empty = match val {
+                Value::Object(ref map) | Value::Map(ref map) => {
+                    let mut entries: Vec<_> = map.iter().collect();
+                    entries.sort_by_key(|(key, _)| *key);
+                    for (key, value) in entries {
+                        self.one_iteration(Value::from(key.clone()), value.clone(), range)?;
+                    }
+                    map.is_empty()
+                }
+                Value::Array(ref values) => {
+                    for (index, value) in values.iter().enumerate() {
+                        self.one_iteration(Value::from(index), value.clone(), range)?;
+                    }
+                    values.is_empty()
+                }
+                Value::Nil | Value::NoValue => true,
+                _ => return Err(ExecError::InvalidRange(val)),
+            };
+            if empty {
+                if let Some(ref otherwise) = range.else_list {
+                    self.walk_list(ctx, otherwise)?;
                 }
             }
-            Value::Array(ref vec) => {
-                for (k, v) in vec.iter().enumerate() {
-                    self.one_iteration(Value::from(k), v.clone(), range)?;
-                }
-            }
-            _ => return Err(ExecError::InvalidRange(val)),
-        }
-        if let Some(ref else_list) = range.else_list {
-            self.walk_list(ctx, else_list)?;
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.vars.pop_back();
+        result
     }
 
     fn print_value(&mut self, val: &Value) -> Result<(), ExecError> {

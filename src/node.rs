@@ -249,6 +249,7 @@ impl Display for TextNode {
 node!(
     PipeNode {
         decl: Vec<VariableNode>,
+        is_assign: bool,
         cmds: Vec<CommandNode>
     }
 );
@@ -270,6 +271,7 @@ impl PipeNode {
             col,
             len,
             decl,
+            is_assign: false,
             cmds: vec![],
         }
     }
@@ -286,12 +288,13 @@ impl Display for PipeNode {
         } else {
             write!(
                 f,
-                "{} := ",
+                "{} {} ",
                 self.decl
                     .iter()
                     .map(|n| n.to_string())
                     .collect::<Vec<String>>()
-                    .join(", ")
+                    .join(", "),
+                if self.is_assign { "=" } else { ":=" }
             )
         };
         decl.and_then(|_| {
