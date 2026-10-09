@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use crate::error::NodeError;
-use crate::go_number::{read_hexadecimal_float, HexadecimalFloat};
+use crate::go_number::{read_hexadecimal_float, separators_are_allowed, HexadecimalFloat};
 use crate::lexer::ItemType;
 use crate::utils::unquote_char;
 
@@ -677,22 +677,15 @@ fn strip_digit_separators(digits: &str, after_base_prefix: bool) -> Option<Strin
 }
 
 /// Removes `_` separators from a decimal or floating point literal, rejecting any
-/// that does not sit between two digits.
+/// that Go would not accept.
 ///
-/// The integer path can get away with simpler rules because its text is all digits
-/// after the prefix; a float also contains `.`, `e` and a sign, so the neighbours
-/// have to be checked directly. Go accepts `1_0.5` but not `1._5`, `1.5_` or `1e_3`.
+/// The integer path above can get away with simpler rules because its text is all
+/// digits once the base prefix is off; a float also contains `.`, `e` and a sign, so
+/// Go's own rule is applied instead. Go accepts `1_0.5` but not `1._5`, `1.5_` or
+/// `1e_3`.
 fn strip_float_separators(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte != b'_' {
-            continue;
-        }
-        let before = index.checked_sub(1).map(|i| bytes[i]);
-        let after = bytes.get(index + 1).copied();
-        if !matches!((before, after), (Some(b'0'..=b'9'), Some(b'0'..=b'9'))) {
-            return None;
-        }
+    if !separators_are_allowed(text) {
+        return None;
     }
     Some(text.chars().filter(|c| *c != '_').collect())
 }
