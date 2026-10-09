@@ -344,7 +344,7 @@ impl LexerStateMachine {
 
     fn lex_text(&mut self) -> State {
         self.width = 0;
-        let x = self.input[self.pos..].find(&LEFT_DELIM);
+        let x = self.input[self.pos..].find(LEFT_DELIM);
         match x {
             Some(x) => {
                 self.pos += x;
@@ -382,7 +382,7 @@ impl LexerStateMachine {
     }
 
     fn at_right_delim(&mut self) -> (bool, bool) {
-        if self.input[self.pos..].starts_with(&RIGHT_DELIM) {
+        if self.input[self.pos..].starts_with(RIGHT_DELIM) {
             return (true, false);
         }
         if self.at_right_trim_delim(self.pos) {

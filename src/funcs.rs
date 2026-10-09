@@ -366,7 +366,7 @@ pub fn index(args: &[Value]) -> Result<Value, FuncError> {
 
 fn get_item<'a>(col: &'a Value, key: &Value) -> Result<&'a Value, FuncError> {
     let ret = match (col, key) {
-        (&Value::Array(ref a), &Value::Number(ref n)) => {
+        (Value::Array(a), Value::Number(n)) => {
             if let Some(i) = n.as_u64() {
                 a.get(i as usize)
             } else {
@@ -526,7 +526,7 @@ ge(a: ref Value, b: ref Value) -> Result<Value, FuncError> {
 
 fn cmp(left: &Value, right: &Value) -> Option<Ordering> {
     match (left, right) {
-        (&Value::Number(ref l), &Value::Number(ref r)) => {
+        (Value::Number(l), Value::Number(r)) => {
             // Exact integer comparison when both sides fit in i64.
             if let (Some(li), Some(ri)) = (l.as_i64(), r.as_i64()) {
                 return li.partial_cmp(&ri);
@@ -547,9 +547,9 @@ fn cmp(left: &Value, right: &Value) -> Option<Ordering> {
             let rf = number_to_f64(r)?;
             lf.partial_cmp(&rf)
         }
-        (&Value::Bool(ref l), &Value::Bool(ref r)) => l.partial_cmp(r),
-        (&Value::String(ref l), &Value::String(ref r)) => l.partial_cmp(r),
-        (&Value::Array(ref l), &Value::Array(ref r)) => l.len().partial_cmp(&r.len()),
+        (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
+        (Value::String(l), Value::String(r)) => l.partial_cmp(r),
+        (Value::Array(l), Value::Array(r)) => l.len().partial_cmp(&r.len()),
         _ => None,
     }
 }

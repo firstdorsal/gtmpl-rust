@@ -21,8 +21,10 @@ jobs:
         run: cargo build --verbose
       - name: Run tests
         run: cargo test --verbose --all-features
+      # `-D warnings` is what makes this a gate. Without it the step reports
+      # whatever it finds and still exits 0.
       - name: Run clippy
-        run: cargo clippy --all-features
+        run: cargo clippy --all-features --all-targets -- -D warnings
 
   publish:
     needs: build
@@ -30,5 +32,17 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
+        with:
+          # merge-base needs history, not just the tagged commit.
+          fetch-depth: 0
+      # A version on crates.io can never be replaced, so refuse to ship one from a
+      # commit that main does not contain: deleting the branch afterwards would
+      # orphan the published source, and the next release cut from main would
+      # silently revert it.
+      - name: Require the tag to be on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_SHA is not an ancestor of origin/main; merge the release branch first"; exit 1; }
       - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

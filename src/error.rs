@@ -99,7 +99,7 @@ impl fmt::Display for StructuredError {
 #[non_exhaustive]
 pub enum ParseError {
     #[error("unexpected {0} in define clause")]
-    UnexpectedInDefineClause(Nodes),
+    UnexpectedInDefineClause(Box<Nodes>),
     #[error("unexpected end")]
     UnexpectedEnd,
     #[error("template: {0}:{1}")]
@@ -176,9 +176,9 @@ pub enum ExecError {
     #[error("{0}")]
     IOError(#[from] std::io::Error),
     #[error("unknown node: {0}")]
-    UnknownNode(Nodes),
+    UnknownNode(Box<Nodes>),
     #[error("expected if or with node, got {0}")]
-    ExpectedIfOrWith(Nodes),
+    ExpectedIfOrWith(Box<Nodes>),
     #[error("unable to convert output to uft-8: {0}")]
     Utf8ConversionFailed(FromUtf8Error),
     #[error("empty var stack")]
@@ -192,11 +192,11 @@ pub enum ExecError {
     #[error("exceeded max template depth")]
     MaxTemplateDepth,
     #[error("error evaluating pipe: {0}")]
-    ErrorEvaluatingPipe(PipeNode),
+    ErrorEvaluatingPipe(Box<PipeNode>),
     #[error("no arguments for command node: {0}")]
     NoArgsForCommandNode(CommandNode),
     #[error("cannot evaluate command: {0}")]
-    CannotEvaluateCommand(Nodes),
+    CannotEvaluateCommand(Box<Nodes>),
     #[error("field chain without fields :/")]
     FieldChainWithoutFields,
     #[error("{0} has arguments but cannot be invoked as function")]
@@ -204,15 +204,15 @@ pub enum ExecError {
     #[error("no fields in eval_chain_node")]
     NoFieldsInEvalChainNode,
     #[error("indirection through explicit nul in {0}")]
-    NullInChain(ChainNode),
+    NullInChain(Box<ChainNode>),
     #[error("cannot handle {0} as argument")]
-    InvalidArgument(Nodes),
+    InvalidArgument(Box<Nodes>),
     #[error("{0} is not a defined function")]
     UndefinedFunction(String),
     #[error(transparent)]
     FuncError(#[from] FuncError),
     #[error("can't give argument to non-function {0}")]
-    ArgumentForNonFunction(Nodes),
+    ArgumentForNonFunction(Box<Nodes>),
     #[error("only maps and objects have fields")]
     OnlyMapsAndObjectsHaveFields,
     #[error("no field `{0}` in {1}")]

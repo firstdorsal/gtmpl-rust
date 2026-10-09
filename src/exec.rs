@@ -244,7 +244,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             Nodes::Template(ref n) => self
                 .walk_template(ctx, n)
                 .map_err(|e| self.wrap_error(e, node)),
-            _ => Err(ExecError::UnknownNode(node.clone())),
+            _ => Err(ExecError::UnknownNode(Box::new(node.clone()))),
         }
     }
 
@@ -294,7 +294,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             val = Some(self.eval_command(ctx, cmd, &val)?);
             // TODO
         }
-        let val = val.ok_or_else(|| ExecError::ErrorEvaluatingPipe(pipe.clone()))?;
+        let val = val.ok_or_else(|| ExecError::ErrorEvaluatingPipe(Box::new(pipe.clone())))?;
         for var in &pipe.decl {
             if pipe.is_assign {
                 self.assign_var(&var.ident[0], val.clone())?;
@@ -338,7 +338,9 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             Nodes::Dot(_) => Ok(ctx.dot.clone()),
             Nodes::Number(ref n) => Ok(n.value.clone()),
             Nodes::String(ref n) => Ok(n.value.clone()),
-            _ => Err(ExecError::CannotEvaluateCommand((*first_word).clone())),
+            _ => Err(ExecError::CannotEvaluateCommand(Box::new(
+                (*first_word).clone(),
+            ))),
         }
     }
 
@@ -390,7 +392,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             return Err(ExecError::NoFieldsInEvalChainNode);
         }
         if let Nodes::Nil(_) = *chain.node {
-            return Err(ExecError::NullInChain(chain.clone()));
+            return Err(ExecError::NullInChain(Box::new(chain.clone())));
         }
         let pipe = self.eval_arg(ctx, &*chain.node)?;
         self.eval_field_chain(&pipe, &chain.field, args, fin)
@@ -409,7 +411,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             Nodes::String(ref n) => Ok(n.value.clone()),
             Nodes::Bool(ref n) => Ok(n.value.clone()),
             Nodes::Number(ref n) => Ok(n.value.clone()),
-            _ => Err(ExecError::InvalidArgument(node.clone())),
+            _ => Err(ExecError::InvalidArgument(Box::new(node.clone()))),
         };
         // Wrap errors with the argument node's position for better error reporting
         result.map_err(|e| self.wrap_error(e, node))
@@ -547,7 +549,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     fn walk_if_or_with(&mut self, node: &'a Nodes, ctx: &Context) -> Result<(), ExecError> {
         let pipe = match *node {
             Nodes::If(ref n) | Nodes::With(ref n) => &n.pipe,
-            _ => return Err(ExecError::ExpectedIfOrWith(node.clone())),
+            _ => return Err(ExecError::ExpectedIfOrWith(Box::new(node.clone()))),
         };
         self.in_new_scope(|state| {
             let val = state
@@ -632,7 +634,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
 
 fn not_a_function(args: &[Nodes], val: &Option<Value>) -> Result<(), ExecError> {
     if args.len() > 1 || val.is_some() {
-        return Err(ExecError::ArgumentForNonFunction(args[0].clone()));
+        return Err(ExecError::ArgumentForNonFunction(Box::new(args[0].clone())));
     }
     Ok(())
 }
