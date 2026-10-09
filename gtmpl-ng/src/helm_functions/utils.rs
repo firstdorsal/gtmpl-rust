@@ -163,4 +163,50 @@ mod tests {
             panic!("Expected object");
         }
     }
+
+    /// `toYaml` read numbers through `as_f64`, which answers only for the float
+    /// variant, so it failed outright on any integer -- `{{ toYaml .ports }}` over a
+    /// list of port numbers, which is most of what a chart passes it. Expectations
+    /// from `gopkg.in/yaml.v3`, which is what Helm marshals with.
+    #[test]
+    fn to_yaml_writes_integers() {
+        for (value, expected) in [
+            (Value::from(vec![1u64, 2, 3]), "- 1\n- 2\n- 3\n"),
+            (Value::from(7u64), "7\n"),
+            (Value::from(-5i64), "-5\n"),
+            (Value::from(u64::MAX), "18446744073709551615\n"),
+            (Value::from(1.5f64), "1.5\n"),
+            (Value::from("s"), "s\n"),
+        ] {
+            assert_eq!(
+                to_yaml(std::slice::from_ref(&value)).unwrap().to_string(),
+                expected,
+                "toYaml of {:?}",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn to_json_writes_integers_as_integers() {
+        for (value, expected) in [
+            (Value::from(vec![1u64, 2, 3]), "[1,2,3]"),
+            (Value::from(7u64), "7"),
+            (Value::from(-5i64), "-5"),
+            (Value::from(1.5f64), "1.5"),
+        ] {
+            assert_eq!(
+                to_json(std::slice::from_ref(&value)).unwrap().to_string(),
+                expected,
+                "toJson of {:?}",
+                value
+            );
+        }
+    }
+
+    /// JSON has no infinity, so there is nothing to write rather than something wrong.
+    #[test]
+    fn to_json_refuses_an_infinity() {
+        assert!(to_json(&[Value::from(f64::INFINITY)]).is_err());
+    }
 }

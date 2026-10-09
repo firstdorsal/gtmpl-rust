@@ -76,6 +76,10 @@ records every one of them, with its header listing the seven that differ and why
 
 ### Fixed
 
+- **`toYaml` no longer fails on an integer.** It read numbers through `as_f64`, which
+  answers only for the float variant, so `{{ toYaml .ports }}` over a list of port
+  numbers -- most of what a chart passes it -- errored with "Cannot convert number to
+  YAML". Output now matches `gopkg.in/yaml.v3`, which is what Helm marshals with.
 - **Negative non-integer numbers are no longer truncated** (#13). `{{ -3.14 }}`
   renders `-3.14`. The fix existed on `gtmpl_value`'s master branch, unreleased, since
   February 2025; vendoring the crate is what delivered it.

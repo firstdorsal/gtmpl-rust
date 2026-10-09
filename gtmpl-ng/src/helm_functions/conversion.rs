@@ -1,17 +1,19 @@
 use crate::Value;
+use gtmpl_value_ng::NumberKind;
 use std::collections::HashMap;
 
 pub fn gtmpl_value_to_serde_yaml_value(value: &Value) -> anyhow::Result<serde_yaml_neo::Value> {
     Ok(match value {
         Value::Nil => serde_yaml_neo::Value::Null,
         Value::Bool(b) => serde_yaml_neo::Value::Bool(*b),
-        Value::Number(n) => {
-            let number = n
-                .as_f64()
-                .ok_or(anyhow::anyhow!("Cannot convert number to YAML"))?;
-
-            serde_yaml_neo::Value::Number(number.into())
-        }
+        // Read through `kind` rather than `as_f64`, which answers only for the float
+        // variant -- so `toYaml` used to fail outright on any integer, which is most
+        // of what a chart passes it.
+        Value::Number(n) => serde_yaml_neo::Value::Number(match n.kind() {
+            NumberKind::Unsigned(u) => u.into(),
+            NumberKind::Signed(i) => i.into(),
+            NumberKind::Float(f) => f.into(),
+        }),
         Value::String(s) => serde_yaml_neo::Value::String(s.clone()),
         Value::Array(a) => {
             let mut array = Vec::new();
@@ -45,23 +47,15 @@ pub fn gtmpl_value_to_serde_json_value(value: &Value) -> anyhow::Result<serde_js
     Ok(match value {
         Value::Nil => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Number(n) => {
-            // Try i64 first, then u64, then f64
-            if let Some(i) = n.as_i64() {
-                serde_json::Value::Number(i.into())
-            } else if let Some(u) = n.as_u64() {
-                serde_json::Value::Number(u.into())
-            } else if let Some(f) = n.as_f64() {
-                serde_json::Value::Number(
-                    serde_json::Number::from_f64(f)
-                        .ok_or(anyhow::anyhow!("Cannot convert float to JSON"))?,
-                )
-            } else {
-                // Fallback: convert to string and parse
-                let s = format!("{}", n);
-                serde_json::from_str(&s)?
-            }
-        }
+        // An integer stays an integer, so the math functions behave the same whichever
+        // source a number came from.
+        Value::Number(n) => serde_json::Value::Number(match n.kind() {
+            NumberKind::Unsigned(u) => u.into(),
+            NumberKind::Signed(i) => i.into(),
+            // JSON has no infinity or NaN, so there is nothing to write.
+            NumberKind::Float(f) => serde_json::Number::from_f64(f)
+                .ok_or_else(|| anyhow::anyhow!("Cannot convert {} to JSON", f))?,
+        }),
         Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Array(a) => {
             let mut array = Vec::new();
