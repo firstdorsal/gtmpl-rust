@@ -8,8 +8,8 @@ The value type and the derive macro now live in this repository as `gtmpl_value_
 and `gtmpl_derive_ng`, so `Value` is finally ours to fix. Most of what follows is the
 consequence: formatting, which was constrained by the old crate, now matches Go.
 
-Expectations were taken from Go 1.26.8 rendering the equivalent input. 243 templates
-were diffed against it; 223 match byte for byte, and `gtmpl-ng/tests/go_conformance.txt`
+Expectations were taken from Go 1.26.8 rendering the equivalent input. 237 templates
+were diffed against it; 217 match byte for byte, and `gtmpl-ng/tests/go_conformance.txt`
 records every one of them. Its header accounts for all 20 that do not: 8 are the same
 failure reported in different words, 1 is identical output that Rust's debug quoting
 shows differently, and 11 are deliberate. `go_conformance.go` beside it regenerates
@@ -41,7 +41,9 @@ the Go side, so none of this has to be taken on trust.
   `{{ printf "%+v" 42 }}` is `42` rather than `+42`. A width or precision beyond a
   million is refused the way Go refuses it, rather than allocating for it.
 - The edition moves to 2021 across the workspace, and `rust-version` is declared as
-  1.85 — set by `std::ptr::fn_addr_eq`, not by the edition, which needs only 1.56.
+  1.85 — set by `std::ptr::fn_addr_eq`, not by the edition, which needs only 1.56. CI
+  checks it on that toolchain. The `helm-functions` feature is above that floor,
+  because `uuid` and `time` set their own and cargo cannot declare one per feature.
 
 ### Added
 

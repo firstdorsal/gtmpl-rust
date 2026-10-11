@@ -1,5 +1,11 @@
 [workspace]
 members = ["gtmpl-ng", "gtmpl_value_ng", "gtmpl_derive_ng"]
+# Version 2, not 3. Version 3 would resolve dependencies against `rust-version` below
+# rather than the running compiler, which reads like a free win and is not: it caps
+# `uuid` and `time` at their 1.85-era releases for every build, including this
+# repository's own CI, so the suite would stop testing what a consumer on current
+# stable actually gets. The MSRV is held by the `msrv` job instead, which tests it
+# directly.
 resolver = "2"
 
 # The three crates are released together under one version, so a tag means the same
@@ -15,7 +21,14 @@ repository = "https://github.com/firstdorsal/gtmpl-rust"
 edition = "2021"
 # Set by two standard-library items rather than by the edition, which only needs 1.56:
 # `std::ptr::fn_addr_eq` (1.85) and `std::iter::repeat_n` (1.82). Declared so cargo
-# says so, instead of the build failing somewhere inside a dependency.
+# says so, instead of the build failing somewhere inside a dependency -- and enforced
+# by the `msrv` job in CI, which reads the number from right here.
+#
+# It covers every feature but one. `helm-functions` pulls `uuid` and `time`, which ask
+# for a newer compiler themselves -- 1.89 and 1.88 at the time of this release -- and
+# cargo has no field for "this feature needs more than its package". Enabling it
+# therefore needs whatever those two currently require; cargo says which version and
+# why, and the README says so as well.
 rust-version = "1.85"
 
 [workspace.dependencies]

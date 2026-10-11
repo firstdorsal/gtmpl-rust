@@ -16,6 +16,8 @@ gtmpl_derive_ng = "0.9"
 gtmpl_value_ng = "0.9"
 ```
 
+Builds on Rust 1.85 and newer, which CI checks on that exact toolchain.
+
 -   [gtmpl_derive_ng at crates.io](https://crates.io/crates/gtmpl_derive_ng)
 -   [gtmpl_derive_ng documentation](https://docs.rs/crate/gtmpl_derive_ng)
 

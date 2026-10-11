@@ -15,6 +15,9 @@ is what a template parses its literals into and what a context hands it back.
 gtmpl_value_ng = "0.9"
 ```
 
+Builds on Rust 1.85 and newer, with either feature below enabled or both, which CI
+checks on that exact toolchain.
+
 -   [gtmpl_value_ng at crates.io](https://crates.io/crates/gtmpl_value_ng)
 -   [gtmpl_value_ng documentation](https://docs.rs/crate/gtmpl_value_ng)
 

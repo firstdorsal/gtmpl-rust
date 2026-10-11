@@ -35,6 +35,9 @@ and look at the docs:
 -   [gtmpl-ng documentation](https://docs.rs/crate/gtmpl-ng)
 -   [golang documentation](https://golang.org/pkg/text/template/)
 
+All three crates build on Rust 1.85 and newer, which CI checks on that exact
+toolchain. The `helm-functions` feature is the one exception; see below.
+
 It's not perfect, yet. Help and feedback is more than welcome.
 
 ## Some Examples
@@ -196,6 +199,12 @@ Enable `helm-functions` to get 152 Helm-compatible template functions:
 version = "0.9"
 features = ["helm-functions"]
 ```
+
+This is the one feature that needs a newer compiler than the crate's declared
+`rust-version`: it pulls `uuid` and `time`, which set their own, higher minimum. Cargo
+refuses the build with the version it wants and the crate that wants it, so there is
+nothing to guess -- and a feature cannot carry its own `rust-version`, which is why the
+manifest cannot say this for you.
 
 ```rust
 use gtmpl_ng::{Template, Context};
