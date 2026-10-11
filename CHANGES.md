@@ -2,7 +2,7 @@
 
 All three crates in this repository share one version and are released together.
 
-## [0.9.0] - 2026-10-09
+## [0.9.0] - 2026-10-12
 
 The value type and the derive macro now live in this repository as `gtmpl_value_ng`
 and `gtmpl_derive_ng`, so `Value` is finally ours to fix. Most of what follows is the

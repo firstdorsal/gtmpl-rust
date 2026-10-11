@@ -73,6 +73,12 @@ uuid = { version = "1", features = ["v4"], optional = true }
 x509-parser = { version = "0.16", optional = true }
 pem = { version = "3", optional = true }
 
+# Without this, docs.rs documents the default feature set only -- and a published
+# version's documentation can never be rebuilt with different settings. `helm-functions`
+# alone is 152 functions that would be missing from the page for good.
+[package.metadata.docs.rs]
+all-features = true
+
 [dev-dependencies]
 criterion = "0.8"
 gtmpl_derive_ng = { workspace = true }
