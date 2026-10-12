@@ -1,0 +1,5 @@
+# `cargo test` alone leaves the helm-function suites out -- see tests/feature_gates.rs,
+# which reports them as ignored rather than letting the run look complete. This alias
+# is the local shorthand for the full run; rust.yml spells the same feature set out.
+[alias]
+test-all = "test --workspace --all-features"

@@ -16,18 +16,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run fmt
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --workspace --verbose
       - name: Run tests
-        run: cargo test --verbose --all-features
+        run: cargo test --workspace --verbose --all-features
+      # The default feature set resolves a different dependency graph, and the
+      # suites that are not gated behind a feature have to pass under it too.
+      - name: Run tests without optional features
+        run: cargo test --workspace --verbose
       # `-D warnings` is what makes this a gate. Without it the step reports
       # whatever it finds and still exits 0.
       - name: Run clippy
-        run: cargo clippy --all-features --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - name: Run clippy without optional features
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Packaging can break on its own -- an `include` that misses a file the tests
+      # read, say -- and finding that out at release time is too late.
+      - name: Check the packages
+        run: cargo package --workspace
+
+  # Every other job runs whatever stable the runner happens to ship, so nothing here
+  # tests the `rust-version` the manifests promise. Without this job that promise is
+  # just a number: it would keep passing CI while a dependency quietly raised the real
+  # floor above it.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The version is read from the manifest rather than written out again, so the two
+      # cannot drift apart.
+      #
+      # Every feature but `helm-functions` is covered, which is what the manifest
+      # claims: that one pulls `uuid` and `time`, and those require a newer compiler
+      # themselves, so `--all-features` here would only be testing their floor.
+      #
+      # `check` and not `test`, because dev-dependencies are the suite's business and
+      # not a consumer's -- holding them to this floor would pin it to criterion's.
+      - name: Check at the declared minimum version
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$msrv" || { echo "::error::no rust-version in the workspace manifest"; exit 1; }
+          echo "declared minimum: $msrv"
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+          rustup run "$msrv" cargo check --workspace \
+            --features gtmpl-ng/gtmpl_dynamic_template,gtmpl-ng/gtmpl_value_compat,gtmpl-ng/mows-functions,gtmpl_value_ng/serde
 
   publish:
-    needs: build
+    needs: [build, msrv]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -44,5 +80,9 @@ jobs:
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
             || { echo "::error::$GITHUB_SHA is not an ancestor of origin/main; merge the release branch first"; exit 1; }
+      # All three crates share one version and go out together. `--workspace` puts
+      # them in dependency order and waits for each to appear in the index before
+      # the next one is verified against it, which publishing them separately would
+      # have to do by hand.
       - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --workspace --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

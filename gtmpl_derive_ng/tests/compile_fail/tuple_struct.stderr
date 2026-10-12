@@ -1,0 +1,5 @@
+error: #[derive(Gtmpl)] needs named fields: a template addresses a context by field name, and a tuple struct has no names to address
+ --> tests/compile_fail/tuple_struct.rs:4:13
+  |
+4 | struct Tuple(u8, u8);
+  |             ^^^^^^^^
