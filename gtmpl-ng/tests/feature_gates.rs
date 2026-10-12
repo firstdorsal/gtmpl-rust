@@ -30,7 +30,7 @@ fn the_resource_bound_suite_ran() {}
 )]
 fn the_panic_suites_ran() {}
 
-/// Roughly 130 unit tests inside `src/helm_functions/`, covering the 152 functions.
+/// Roughly 130 unit tests inside `src/helm_functions/`, covering the 150 functions.
 #[test]
 #[cfg_attr(
     not(feature = "helm-functions"),

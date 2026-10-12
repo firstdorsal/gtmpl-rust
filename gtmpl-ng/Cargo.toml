@@ -48,7 +48,6 @@ all-functions = ["helm-functions", "mows-functions"]
 
 [dependencies]
 lazy_static = "1"
-percent-encoding = "2"
 # `%q` has to escape whatever Go's `strconv.IsPrint` rejects, which is a Unicode
 # general-category question the standard library cannot answer.
 unicode-general-category = "1"
@@ -75,7 +74,7 @@ pem = { version = "3", optional = true }
 
 # Without this, docs.rs documents the default feature set only -- and a published
 # version's documentation can never be rebuilt with different settings. `helm-functions`
-# alone is 152 functions that would be missing from the page for good.
+# alone is 150 functions that would be missing from the page for good.
 [package.metadata.docs.rs]
 all-features = true
 

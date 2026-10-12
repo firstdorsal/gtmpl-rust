@@ -74,8 +74,17 @@ pub fn random_string(args: &[Value]) -> Result<Value, FuncError> {
     }
     let mut rng = rand::rng();
 
-    // `length` parsed as a `u16` above, so it cannot exceed 65535 -- the bound the
-    // other generators get from `utils::TOO_MANY` is already implicit here.
+    // The `u16` parse above already makes memory exhaustion impossible -- 65535
+    // characters at worst -- but a caller who lowered the limit meant it to apply to
+    // every generating function, so honour it here as `repeat` and the `rand*` family
+    // do.
+    if let Some(limit) = crate::limits::active().function_output {
+        if usize::from(length) > limit {
+            return Err(FuncError::Generic(format!(
+                "randomString: {length} characters is more than the {limit} this allows"
+            )));
+        }
+    }
     let generated: String = (0..length)
         .map(|_| {
             let idx = rand::Rng::random_range(&mut rng, 0..charset.len());

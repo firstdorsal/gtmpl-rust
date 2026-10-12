@@ -1,7 +1,10 @@
 use std::collections::VecDeque;
-use std::io::Write;
+use std::fmt;
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 use crate::error::ExecError;
+use crate::limits::{self, Limits};
 use crate::node::*;
 use crate::template::Template;
 use crate::utils::{is_absent, is_true};
@@ -20,7 +23,245 @@ enum Flow {
     Continue,
 }
 
-const MAX_TEMPLATE_DEPTH: usize = 100_000;
+/// How deep the engine may recurse through nested bodies.
+///
+/// Go's own limit is 100 000 and counts `{{template}}` nesting alone, which it can
+/// afford because a goroutine stack grows on demand. Ours does not: nesting is
+/// recursion in this process, and `{{define "r"}}{{template "r" .}}{{end}}{{template
+/// "r" .}}` overflowed the stack and aborted -- a core dump out of fifty-seven
+/// characters, past the `Result` this API returns.
+///
+/// It counts every nested body rather than only templates, because the stack does not
+/// care which kind of nesting put a frame on it. Counting templates could not work:
+/// measured against a template-only counter, a body of sixty nested `{{if}}` reached
+/// the same stack usage at a fortieth of the template depth, so any value safe for one
+/// shape was either useless or fatal for the other.
+///
+/// The number is measured, in the most expensive configuration a consumer actually
+/// runs: an unoptimised build on a 2 MiB stack, which is what `std::thread`, a Tokio
+/// worker and the test harness all give -- against 8 MiB for a main thread, and
+/// roughly eight times less stack per level once optimised.
+///
+/// | Shape, debug, 2 MiB stack | Aborted at |
+/// |---|---|
+/// | `{{range}}` bodies, with or without variables, pipelines or calls | 220 |
+/// | one body per level | 320 |
+/// | `{{if}}` and `{{with}}` bodies | past 400 |
+///
+/// 100 therefore sits at less than half the worst case measured, and more than twelve
+/// times above what real templates reach: of the 157 templates in the deployment
+/// corpus this engine renders, the deepest does not pass 8.
+///
+/// `tests/malicious_templates.rs` holds the margin rather than trusting it. It drives
+/// the `{{range}}` shape on a 2 MiB thread under `cargo test`, which is the worst case
+/// in the table, so a change that makes a level dearer takes the test binary down
+/// instead of reaching a consumer.
+///
+/// Not part of [`Limits`] for the same reason: no value above this one is safe, so the
+/// knob would only be a way to abort the process.
+const MAX_NESTING_DEPTH: usize = 100;
+
+/// How many loop iterations pass between two readings of the clock.
+///
+/// Measured over a million iterations of `{{ range }}x{{ end }}`: an iteration costs
+/// 26.9 ns, and reading the clock on every one made it 40.4 -- a 50% tax on a render
+/// that asked for a time bound, not for a slower loop. Every 64th puts it inside the noise
+/// and costs at most 64 iterations of overshoot, which is microseconds for a body
+/// cheap enough for the stride to matter at all. Anything expensive in a body is a
+/// function call, and those are checked one for one.
+const ITERATIONS_PER_CLOCK_READ: u32 = 64;
+
+/// The writer, plus what is left of the render's budget.
+///
+/// The whole render shares one of these. A nested `{{template}}` builds its own
+/// [`State`] but borrows this, so no amount of nesting hands a template a fresh
+/// allowance -- which is the point, because nesting is how three loops that each obey
+/// [`Limits::iterations`] come to 10¹² iterations together.
+///
+/// Wrapping the writer rather than counting at each call site is deliberate: every
+/// byte the engine emits goes through `Write`, so a write path added later is counted
+/// without anyone having to remember to.
+struct Budget<T: Write> {
+    writer: T,
+    limits: Limits,
+    bytes_left: usize,
+    iterations_left: usize,
+    /// The instant the deadline falls on and the span it was, together, so the error
+    /// can name the configured span without a fallback for a state that cannot occur.
+    /// The instant is held so a check is a comparison; `None` means the clock is
+    /// never read.
+    deadline: Option<(Instant, Duration)>,
+    /// Iterations still to go before the clock is read again. See
+    /// `ITERATIONS_PER_CLOCK_READ`.
+    until_clock_read: u32,
+}
+
+/// The marker [`Budget::write`] refuses with, so [`Budget::explain`] can tell a
+/// budget refusal from a real I/O failure by downcasting rather than by a flag that
+/// would outlive the write it described.
+#[derive(Debug, thiserror::Error)]
+#[error("the render is over its output budget")]
+struct OverBudget;
+
+impl<T: Write> Budget<T> {
+    fn new(writer: T, limits: Limits) -> Budget<T> {
+        Budget {
+            writer,
+            limits,
+            bytes_left: limits.output_bytes.unwrap_or(usize::MAX),
+            iterations_left: limits.total_iterations.unwrap_or(usize::MAX),
+            // Paired with the span out of the same `Limits`, and only when the
+            // installed deadline produced an instant at all -- an unrepresentable
+            // span is no deadline, and the pair keeps the two from drifting apart.
+            deadline: limits::expires().zip(limits.deadline),
+            // One, not the stride: a deadline that has already passed has to stop the
+            // first iteration, not the sixty-fifth.
+            until_clock_read: 1,
+        }
+    }
+
+    /// Refuses to carry on once the render's deadline has passed.
+    ///
+    /// Costs nothing when none is set -- the clock is not read at all -- which is what
+    /// lets this sit on the per-iteration path without charging every render for a
+    /// feature most do not use.
+    fn check_deadline(&self) -> Result<(), ExecError> {
+        if let Some((expires, deadline)) = self.deadline {
+            if Instant::now() >= expires {
+                return Err(ExecError::DeadlineExceeded { deadline });
+            }
+        }
+        Ok(())
+    }
+
+    /// Charges one loop iteration against the render's total, and reads the clock
+    /// every so often.
+    fn spend_iteration(&mut self) -> Result<(), ExecError> {
+        if self.deadline.is_some() {
+            self.until_clock_read -= 1;
+            if self.until_clock_read == 0 {
+                self.until_clock_read = ITERATIONS_PER_CLOCK_READ;
+                self.check_deadline()?;
+            }
+        }
+        match self.iterations_left.checked_sub(1) {
+            Some(left) => {
+                self.iterations_left = left;
+                Ok(())
+            }
+            // Unreachable with no total set: the counter starts at `usize::MAX`.
+            None => Err(ExecError::TooManyIterations {
+                limit: self.limits.total_iterations.unwrap_or(usize::MAX),
+            }),
+        }
+    }
+
+    /// Names the real cause of a failed write.
+    fn explain(&self, error: io::Error) -> ExecError {
+        if error
+            .get_ref()
+            .is_some_and(|inner| inner.is::<OverBudget>())
+        {
+            ExecError::OutputTooLarge {
+                limit: self.limits.output_bytes.unwrap_or(usize::MAX),
+            }
+        } else {
+            ExecError::IOError(error)
+        }
+    }
+}
+
+impl<T: Write> Write for Budget<T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.len() > self.bytes_left {
+            return Err(io::Error::other(OverBudget));
+        }
+        let written = self.writer.write(buf)?;
+        self.bytes_left -= written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+/// Which of the two lazily evaluated builtins a call is, and so which truth value
+/// ends its evaluation early.
+#[derive(Clone, Copy)]
+enum Logic {
+    And,
+    Or,
+}
+
+impl Logic {
+    /// The truth value that settles the answer: `and` is decided by its first falsy
+    /// argument, `or` by its first truthy one.
+    fn short_circuits_on(self) -> bool {
+        matches!(self, Logic::Or)
+    }
+}
+
+/// How deep a value handed back by a function may nest.
+///
+/// `Clone`, `Drop`, `Display` and the serializers walk a value recursively, so a
+/// value's depth is stack usage the same way nesting depth is -- measured, an array
+/// 10 001 levels deep, built by `{{ $x = list $x }}` in a loop, aborted a 2 MiB
+/// thread inside `Display`. 128 is far above any data a template legitimately builds
+/// and far below the measured abort, and it is not a [`Limits`] knob for the same
+/// reason `MAX_NESTING_DEPTH` is not: there is no safe value above it to offer.
+/// Host data is never walked -- the host built it, so it is theirs to size -- only
+/// what a function hands back is.
+const MAX_VALUE_DEPTH: usize = 128;
+
+/// Refuses a function result that would endanger the process by being *held*.
+///
+/// [`Limits::function_output`] bounds what the generating functions produce, but a
+/// value can also grow by feeding a function its own output: `{{ $s = print $s $s }}`
+/// doubles per loop iteration and reaches 2^43 bytes inside forty of them, with every
+/// counter content, until the allocator aborts. Every such growth passes through a
+/// function call, so this is the one choke point: the result's weight -- string bytes
+/// plus container elements and keys -- is judged against the same `function_output`
+/// budget, and its depth against [`MAX_VALUE_DEPTH`].
+///
+/// The walk is iterative, so measuring a hostile value cannot itself overflow the
+/// stack, and it stops at the first violation rather than sizing the whole value.
+fn check_produced_value(value: &Value, limits: &Limits) -> Result<(), ExecError> {
+    let budget = limits.function_output;
+    let mut weight: usize = 0;
+    let mut stack: Vec<(usize, &Value)> = vec![(1, value)];
+    while let Some((depth, value)) = stack.pop() {
+        if depth > MAX_VALUE_DEPTH {
+            return Err(ExecError::ValueTooDeep {
+                limit: MAX_VALUE_DEPTH,
+            });
+        }
+        weight = weight.saturating_add(match value {
+            Value::String(text) => text.len(),
+            Value::Array(items) => {
+                for item in items {
+                    stack.push((depth + 1, item));
+                }
+                items.len()
+            }
+            Value::Map(entries) | Value::Object(entries) => {
+                let mut key_bytes = 0usize;
+                for (key, item) in entries {
+                    key_bytes = key_bytes.saturating_add(key.len());
+                    stack.push((depth + 1, item));
+                }
+                entries.len().saturating_add(key_bytes)
+            }
+            _ => 1,
+        });
+        if let Some(budget) = budget {
+            if weight > budget {
+                return Err(ExecError::ValueTooLarge { limit: budget });
+            }
+        }
+    }
+    Ok(())
+}
 
 struct Variable {
     name: String,
@@ -98,7 +339,7 @@ fn lookup_field_chain<'v>(
 struct State<'a, 'b, 'c, T: Write> {
     template: &'a Template,
     template_name: String,
-    writer: &'b mut T,
+    writer: &'b mut Budget<T>,
     root: &'c Value,
     node: Option<&'a Nodes>,
     vars: VecDeque<VecDeque<Variable>>,
@@ -129,10 +370,17 @@ impl<'b> Template {
         let mut vars: VecDeque<VecDeque<Variable>> = VecDeque::new();
         vars.push_back(VecDeque::new());
 
+        // Template functions are bare `fn` pointers with nowhere to pass a limit, so
+        // the ones that turn a number into an allocation read it from the thread for
+        // as long as this render runs. Dropped at the end of the call, restoring
+        // whatever was there -- which is what makes a render inside a function safe.
+        let _active = limits::Active::install(self.limits);
+        let mut budget = Budget::new(writer, self.limits);
+
         let mut state = State {
             template: self,
             template_name: self.name.clone(),
-            writer,
+            writer: &mut budget,
             root: &data.dot,
             node: None,
             vars,
@@ -227,6 +475,21 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     }
 
     fn walk_list(&mut self, ctx: &Context, node: &'a ListNode) -> Result<Flow, ExecError> {
+        // Every nested body is entered through here -- an `{{if}}` branch, a loop
+        // body, a template being called -- so this is the one place that has to count
+        // for the stack to stay bounded. See `MAX_NESTING_DEPTH`.
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(ExecError::MaxTemplateDepth {
+                limit: MAX_NESTING_DEPTH,
+            });
+        }
+        self.depth += 1;
+        let result = self.walk_nodes(ctx, node);
+        self.depth -= 1;
+        result
+    }
+
+    fn walk_nodes(&mut self, ctx: &Context, node: &'a ListNode) -> Result<Flow, ExecError> {
         for n in &node.nodes {
             // A `{{break}}` or `{{continue}}` abandons the rest of the list and keeps
             // travelling outwards until a `{{range}}` catches it.
@@ -260,8 +523,8 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                 .map_err(|e| self.wrap_error(e, node))
                 .map(|()| Flow::Done),
             Nodes::List(ref n) => self.walk_list(ctx, n),
-            Nodes::Text(ref n) => write!(self.writer, "{}", n)
-                .map_err(ExecError::IOError)
+            Nodes::Text(ref n) => self
+                .write_output(format_args!("{}", n))
                 .map(|()| Flow::Done),
             // A `{{define}}` body is its own template, so the parser has already
             // refused a `{{break}}` in one: nothing can escape through here.
@@ -271,11 +534,15 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                 .map(|()| Flow::Done),
             Nodes::Break(_) => Ok(Flow::Break),
             Nodes::Continue(_) => Ok(Flow::Continue),
-            _ => Err(ExecError::UnknownNode(Box::new(node.clone()))),
+            _ => Err(ExecError::UnknownNode(node.to_string())),
         }
     }
 
     fn walk_template(&mut self, ctx: &Context, template: &TemplateNode) -> Result<(), ExecError> {
+        // Charged like a loop iteration: the depth cap bounds how deep calls go, but
+        // nothing else bounds how *many* there are, and two calls per level is 2^100
+        // calls inside a depth of 100. Drawing on the shared total closes that.
+        self.writer.spend_iteration()?;
         let name = match template.name {
             PipeOrString::String(ref name) => name.to_owned(),
             PipeOrString::Pipe(ref pipe) => {
@@ -286,9 +553,6 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                 }
             }
         };
-        if self.depth >= MAX_TEMPLATE_DEPTH {
-            return Err(ExecError::MaxTemplateDepth);
-        }
         let tree = self.template.tree_set.get(&name);
         if let Some(tree) = tree {
             if let Some(ref root) = tree.root {
@@ -307,7 +571,10 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                     root: &context.dot,
                     node: None,
                     vars,
-                    depth: self.depth + 1,
+                    // Carried on, not restarted: the frames this template's body puts
+                    // on the stack sit on top of the ones already there, so a fresh
+                    // count per template would be no count at all.
+                    depth: self.depth,
                 };
                 // A `{{break}}` cannot occur in a template body -- the parser
                 // refuses one outside a `{{range}}`, and a body is its own template.
@@ -321,9 +588,8 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         let mut val: Option<Value> = None;
         for cmd in &pipe.cmds {
             val = Some(self.eval_command(ctx, cmd, &val)?);
-            // TODO
         }
-        let val = val.ok_or_else(|| ExecError::ErrorEvaluatingPipe(Box::new(pipe.clone())))?;
+        let val = val.ok_or_else(|| ExecError::ErrorEvaluatingPipe(pipe.to_string()))?;
         for var in &pipe.decl {
             if pipe.is_assign {
                 self.assign_var(&var.ident[0], val.clone())?;
@@ -351,7 +617,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         let first_word = &cmd
             .args
             .first()
-            .ok_or_else(|| ExecError::NoArgsForCommandNode(cmd.clone()))?;
+            .ok_or_else(|| ExecError::NoArgsForCommandNode(cmd.to_string()))?;
 
         match *(*first_word) {
             Nodes::Field(ref n) => return self.eval_field_node(ctx, n, &cmd.args, val),
@@ -367,9 +633,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             Nodes::Dot(_) => Ok(ctx.dot.clone()),
             Nodes::Number(ref n) => Ok(n.value.clone()),
             Nodes::String(ref n) => Ok(n.value.clone()),
-            _ => Err(ExecError::CannotEvaluateCommand(Box::new(
-                (*first_word).clone(),
-            ))),
+            _ => Err(ExecError::CannotEvaluateCommand(first_word.to_string())),
         }
     }
 
@@ -381,12 +645,28 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         fin: &Option<Value>,
     ) -> Result<Value, ExecError> {
         let name = &ident.ident;
-        let function = self
+        let function = *self
             .template
             .funcs
             .get(name.as_str())
             .ok_or_else(|| ExecError::UndefinedFunction(name.to_string()))?;
-        self.eval_call(ctx, *function, args, fin)
+        // Go evaluates `and` and `or` lazily since 1.18: the arguments after the one
+        // that decides are never evaluated, so `{{ and false (len nil) }}` is `false`
+        // rather than an error. Recognised by name *and* address: the name so the
+        // builtin registered under another name keeps ordinary call semantics, the
+        // address so a caller's own function registered *as* "and" or "or" does too.
+        // Addresses of distinct functions are not guaranteed distinct across every
+        // codegen, so if the match ever fails the fallback is eager evaluation --
+        // Go's own semantics before 1.18: the same values, more work, never less.
+        let lazy = match name.as_str() {
+            "and" if std::ptr::fn_addr_eq(function, crate::funcs::and as Func) => Some(Logic::And),
+            "or" if std::ptr::fn_addr_eq(function, crate::funcs::or as Func) => Some(Logic::Or),
+            _ => None,
+        };
+        if let Some(logic) = lazy {
+            return self.eval_lazy_logic(ctx, logic, function, args, fin);
+        }
+        self.eval_call(ctx, function, args, fin)
     }
 
     fn eval_call(
@@ -407,7 +687,44 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             arg_vals.push(f.clone());
         }
 
-        function(&arg_vals).map_err(Into::into)
+        // Before the call, not after: a function runs to its end whatever the deadline
+        // says, so what a check here buys is that the *next* one does not start.
+        self.writer.check_deadline()?;
+        let value = function(&arg_vals)?;
+        check_produced_value(&value, &self.template.limits)?;
+        Ok(value)
+    }
+
+    /// Go's lazy `and`/`or`: arguments evaluate left to right only until one whose
+    /// truth short-circuits the [`Logic`], and the last one evaluated is returned.
+    ///
+    /// A piped value (`fin`) is the final argument, already evaluated by the pipe.
+    /// With no arguments at all the real function is called empty, so the arity error
+    /// stays the function's own.
+    fn eval_lazy_logic(
+        &mut self,
+        ctx: &Context,
+        logic: Logic,
+        function: Func,
+        args: &[Nodes],
+        fin: &Option<Value>,
+    ) -> Result<Value, ExecError> {
+        self.writer.check_deadline()?;
+        let mut last: Option<Value> = None;
+        for arg in args.iter().skip(1) {
+            let val = self.eval_arg(ctx, arg)?;
+            if is_true(&val) == logic.short_circuits_on() {
+                return Ok(val);
+            }
+            last = Some(val);
+        }
+        if let Some(ref f) = *fin {
+            return Ok(f.clone());
+        }
+        match last {
+            Some(val) => Ok(val),
+            None => function(&[]).map_err(Into::into),
+        }
     }
 
     fn eval_chain_node(
@@ -437,7 +754,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             Nodes::String(ref n) => Ok(n.value.clone()),
             Nodes::Bool(ref n) => Ok(n.value.clone()),
             Nodes::Number(ref n) => Ok(n.value.clone()),
-            _ => Err(ExecError::InvalidArgument(Box::new(node.clone()))),
+            _ => Err(ExecError::InvalidArgument(node.to_string())),
         };
         // Wrap errors with the argument node's position for better error reporting
         result.map_err(|e| self.wrap_error(e, node))
@@ -536,6 +853,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
 
         match resolve_field(receiver, field_name)? {
             FieldOutcome::Found(Value::Function(f)) => {
+                self.writer.check_deadline()?;
                 (f.f)(std::slice::from_ref(receiver)).map_err(Into::into)
             }
             FieldOutcome::Found(field) => Ok(field.clone()),
@@ -575,7 +893,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     fn walk_if_or_with(&mut self, node: &'a Nodes, ctx: &Context) -> Result<Flow, ExecError> {
         let pipe = match *node {
             Nodes::If(ref n) | Nodes::With(ref n) => &n.pipe,
-            _ => return Err(ExecError::ExpectedIfOrWith(Box::new(node.clone()))),
+            _ => return Err(ExecError::ExpectedIfOrWith(node.to_string())),
         };
         self.in_new_scope(|state| {
             let val = state
@@ -610,6 +928,10 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         val: Value,
         range: &'a RangeNode,
     ) -> Result<Flow, ExecError> {
+        // Charged here rather than in the three loops above it, so iterating a map,
+        // an array or an integer all draw on the same total and a new kind of range
+        // cannot be added without one.
+        self.writer.spend_iteration()?;
         match range.pipe.decl.as_slice() {
             [value] => self.assign_var(&value.ident[0], val.clone())?,
             [key_var, value] => {
@@ -669,6 +991,21 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                     if range.pipe.decl.len() > 1 {
                         return Err(ExecError::RangeOverOneVariable(val));
                     }
+                    // The count a template asked for, as opposed to the length of
+                    // something the host handed it. `{{range 1000000000}}` ran until
+                    // it was killed; a map or array from the context is not capped
+                    // here, because the template cannot inflate it.
+                    if let Some(limit) = state.template.limits.iterations {
+                        // `map_or(true, ..)`: a count that does not fit a `usize` cannot be
+                        // under a `usize` limit -- on 64-bit the branch is dead, on 32-bit it is
+                        // the check. Negative counts iterate zero times and pass.
+                        if count > 0 && usize::try_from(count).map_or(true, |count| count > limit) {
+                            return Err(ExecError::RangeTooLong {
+                                asked: count,
+                                limit,
+                            });
+                        }
+                    }
                     for index in 0..count {
                         let index = Value::from(index);
                         if state.one_iteration(index.clone(), index, range)? == Flow::Break {
@@ -692,14 +1029,26 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     }
 
     fn print_value(&mut self, val: &Value) -> Result<(), ExecError> {
-        write!(self.writer, "{}", val).map_err(ExecError::IOError)?;
-        Ok(())
+        // Go's `printValue` writes an untyped nil as `<no value>` -- `{{ and nil 1 }}`
+        // prints `<no value>` there. `fmt.Sprint` writes `<nil>`, but that is the
+        // `print` family's path, not an action's.
+        if matches!(val, Value::Nil) {
+            return self.write_output(format_args!("<no value>"));
+        }
+        self.write_output(format_args!("{}", val))
+    }
+
+    /// Writes through the budget, reporting a refusal as the limit it hit.
+    fn write_output(&mut self, args: fmt::Arguments<'_>) -> Result<(), ExecError> {
+        self.writer
+            .write_fmt(args)
+            .map_err(|error| self.writer.explain(error))
     }
 }
 
 fn not_a_function(args: &[Nodes], val: &Option<Value>) -> Result<(), ExecError> {
     if args.len() > 1 || val.is_some() {
-        return Err(ExecError::ArgumentForNonFunction(Box::new(args[0].clone())));
+        return Err(ExecError::ArgumentForNonFunction(args[0].to_string()));
     }
     Ok(())
 }

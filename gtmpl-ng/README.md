@@ -19,10 +19,10 @@ Add the following dependency to your Cargo manifest…
 
 ```toml
 [dependencies]
-gtmpl-ng = "0.10"
+gtmpl-ng = "1"
 # Only for `#[derive(Gtmpl)]`, which generates the conversion for a struct.
-gtmpl_derive_ng = "0.10"
-gtmpl_value_ng = "0.10"
+gtmpl_derive_ng = "1"
+gtmpl_value_ng = "1"
 ```
 
 `gtmpl_value_ng`'s whole surface is re-exported here -- `Value`, `Number`,
@@ -131,12 +131,30 @@ Behaviour follows Go's `text/template`:
 -   **Map keys are iterated in sorted order**, which makes rendering deterministic.
 -   **`{{ else }}` on a `range`** runs only when the collection is empty, and ranging
     over nil takes that branch rather than failing.
--   **A function that generates cannot be asked for more than a million.** `repeat`,
-    `until`, `untilStep`, `seq`, `indent` and the `rand*` family refuse a count past
-    `1000000` with an error rather than allocating for it. Go recovers a panicking
-    template function into a template error; this engine returns `Result`, so a request
-    that would exhaust memory has to be refused rather than attempted. It is the same
-    line `printf` holds on a width or precision.
+-   **A render is bounded, and the bounds are adjustable.** A template can be untrusted
+    input, and four one-line templates used to end the process outright -- a recursive
+    `{{ template }}` overflowed the stack, `{{ range 1000000000 }}` ran until it was
+    killed. Go recovers a panicking template function into a template error; this engine
+    returns `Result`, and an overflowed stack or a failed allocation aborts rather than
+    returning, so a request that would end the process has to be refused rather than
+    attempted. By default one `{{ range }}` (and one `until`, `untilStep` or `seq`) runs
+    at most 10 000 iterations, a whole render 1 000 000, output stops at 64 MiB, and one
+    `repeat`, `indent` or `rand*` produces at most 1 000 000 characters -- the same line
+    `printf` holds on a width or precision. Pass your own through
+    `Template::with_limits`, or `Limits::unlimited()` to switch them off; see
+    [`limits`](https://docs.rs/gtmpl-ng/latest/gtmpl_ng/limits/) for what is bounded and
+    what is not. Nesting depth is capped at 100 and is not adjustable, because no larger
+    value is safe on a 2 MiB stack.
+-   **A render can be given a deadline**, and it is the one limit that is off by
+    default: the counters above all bound something the template asked for, so the same
+    template answers the same way on any machine, where a deadline would make a render
+    fail on a loaded host and pass on an idle one. It is what covers the gap the
+    counters cannot -- a template inside every budget can still be written to be slow.
+    Set `Limits::deadline`; the clock starts at each `render`, it is checked before
+    every function call and on every 64th iteration, and it stops a render within a
+    fraction of a millisecond for no measurable cost. It cannot interrupt a single call:
+    one `genCA` runs to its end and the deadline stops the next one. A custom function
+    that works in pieces can read `limits::remaining()`.
 -   **`slice`** is Go's builtin: `slice x i j` is the half-open range, `slice x i` runs
     to the end, and `slice x` is `x`. It takes a string or a list. Go indexes a string
     by byte and will happily return invalid UTF-8 -- `slice "héllo" 1 2` is the single
@@ -175,30 +193,47 @@ registry, so a plain `cargo test` leaves them out. They are reported as ignored 
 than silently skipped (see `tests/feature_gates.rs`); run the whole suite with
 `cargo test --workspace --all-features`, or the `cargo test-all` alias.
 
-## Current Limitations
+## Where this engine deliberately differs from Go
 
-This is work in progress. Currently the following features are not supported:
+These are decisions, not gaps: each one is pinned by cases in
+`tests/go_conformance.txt`, whose header carries the full reasoning, and changing any
+of them is a breaking change.
 
--   complex numbers
--   `html` and `js` have not been implemented
--   numbers of different kinds compare permissively, Sprig-style rather than Go-style:
-    `{{ eq 3.0 3 }}` and `{{ lt 5 3.5 }}` answer, where Go refuses with "incompatible
-    types for comparison". A whole float is stored as an integer, which is what makes
-    that work -- and it also means a float verb on an integer cannot be refused, so
-    `{{ printf "%f" 3 }}` gives `3.000000` where Go gives `%!f(int=3)`, and
-    `{{ range 3.0 }}` iterates where Go refuses to iterate a float
--   an integer literal above `i64` is accepted and printed where Go's parser refuses it
--   rendered with no data at all, `{{ .field }}` is an error rather than Go's
-    `<no value>`
--   declaring a variable from a large value (`{{ $top := . }}`) copies it; field reads
-    through the variable do not
--   some `printf` verbs differ from Go's `fmt`, all recorded in
-    `tests/go_conformance.txt`:
-    -   `%b` and `%x` on a float are not implemented; Go writes a power-of-two mantissa
-        and hexadecimal float notation
-    -   `%#v` renders as plain `%v` rather than Go's syntax representation
-    -   `%#g` does not restore the trailing zeros Go restores
-    -   `%p` and Go's struct-field `%+v` have no counterpart here
+-   **Comparison is permissive, Sprig-style.** Values of different kinds compare
+    instead of failing: `{{ eq 3.0 3 }}` and `{{ lt 5 3.5 }}` answer, `{{ eq "a" 1 }}`
+    is `false`, and `{{ lt true false }}` orders booleans -- where Go refuses each with
+    "incompatible types for comparison" or "invalid type for comparison".
+-   **A whole float is stored as an integer**, which is what makes the above work and
+    `{{ 3.0 }}` render `3` the way Go does. In exchange a float verb on an integer
+    cannot be refused -- `{{ printf "%f" 3 }}` gives `3.000000` where Go gives
+    `%!f(int=3)` -- a whole float never switches to the exponent notation Go uses from
+    1e6 up, and `{{ range 3.0 }}` iterates where Go refuses to iterate a float.
+-   **An integer literal above `i64` is read as a `u64`** and printed, where Go's
+    parser refuses it with "overflows int".
+-   **Rendered with no data at all, `{{ .field }}` is an error** rather than Go's
+    `<no value>`: a field read on nothing is a mistake in the template, not missing
+    data. A missing key on a real map still renders `<no value>`.
+-   **A render is bounded by default** -- iterations, output size, function output,
+    nesting -- where Go renders without limits. It is the one difference a caller can
+    switch off, with `Limits::unlimited()`. See `src/limits.rs`.
+-   **Printability follows this engine's Unicode tables, not Go's.** What `js` passes
+    through raw and what `%q` leaves unescaped is decided by `strconv.IsPrint`'s
+    definition applied over the Unicode version the `unicode-general-category`
+    dependency ships, where Go applies it over its own (15.0.0 in Go 1.26). Runes
+    assigned between the two versions render raw here and escaped there; every
+    metacharacter either escaper exists for is escaped by both.
+-   **Some `printf` verbs differ from Go's `fmt`**, all recorded in
+    `tests/go_conformance.txt`: `%b` and `%x` on a float (Go writes a power-of-two
+    mantissa and hexadecimal float notation), `%#v` (renders as plain `%v`), `%#g`
+    (does not restore the trailing zeros Go restores), and `%p` and Go's struct-field
+    `%+v`, which have no counterpart here because there are no addresses or struct
+    types to show.
+-   **Complex numbers do not exist here.** Go's parser accepts `2i` because Go the
+    language has the type; a configuration template has no use for one, and `Value`
+    has no variant to hold it.
+-   **Declaring a variable from a large value (`{{ $top := . }}`) copies it**; field
+    reads through the variable do not. A cost difference rather than a behavioural
+    one.
 
 ## Enhancements
 
@@ -207,11 +242,11 @@ there might be some convenient additions:
 
 ### Helm Template Functions
 
-Enable `helm-functions` to get 152 Helm-compatible template functions:
+Enable `helm-functions` to get 150 Helm-compatible template functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.10"
+version = "1"
 features = ["helm-functions"]
 ```
 
@@ -240,7 +275,7 @@ Enable `mows-functions` to get 3 additional mows-specific functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.10"
+version = "1"
 features = ["mows-functions"]
 ```
 
@@ -255,7 +290,7 @@ Enable `all-functions` to get both Helm and mows functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.10"
+version = "1"
 features = ["all-functions"]
 ```
 
@@ -263,7 +298,7 @@ features = ["all-functions"]
 use gtmpl_ng::all_functions::all_functions;
 
 fn main() {
-    let funcs = all_functions(); // Vec of all 155 functions
+    let funcs = all_functions(); // Vec of all 153 functions
 }
 ```
 
@@ -273,7 +308,7 @@ Enable `gtmpl_dynamic_template` in your `Cargo.toml`:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.10"
+version = "1"
 features = ["gtmpl_dynamic_template"]
 ```
 

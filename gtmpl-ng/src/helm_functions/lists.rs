@@ -298,33 +298,6 @@ pub fn must_compact(args: &[Value]) -> Result<Value, FuncError> {
     compact(args)
 }
 
-/// Get element at index
-pub fn index_list(args: &[Value]) -> Result<Value, FuncError> {
-    let list = args.first().ok_or(FuncError::ExactlyXArgs(
-        "This function requires exactly 2 arguments.".to_string(),
-        2,
-    ))?;
-    let idx = args.get(1).ok_or(FuncError::ExactlyXArgs(
-        "This function requires exactly 2 arguments.".to_string(),
-        2,
-    ))?;
-
-    let idx = idx
-        .to_string()
-        .parse::<usize>()
-        .map_err(|_| FuncError::Generic("Index must be a number".to_string()))?;
-
-    match list {
-        Value::Array(arr) => arr
-            .get(idx)
-            .cloned()
-            .ok_or(FuncError::Generic("Index out of bounds".to_string())),
-        _ => Err(FuncError::Generic(
-            "First argument must be an array".to_string(),
-        )),
-    }
-}
-
 /// Slice a list
 pub fn slice(args: &[Value]) -> Result<Value, FuncError> {
     let list = args.first().ok_or(FuncError::AtLeastXArgs(
@@ -383,7 +356,7 @@ pub fn until(args: &[Value]) -> Result<Value, FuncError> {
         .parse::<i64>()
         .map_err(|_| FuncError::Generic("Argument must be a number".to_string()))?;
 
-    let count = crate::helm_functions::bounded_count(count, "elements", "until")?;
+    let count = crate::helm_functions::bounded_elements(count, "until")?;
     let result: Vec<Value> = (0..count).map(|i| Value::Number(i.into())).collect();
     Ok(Value::Array(result))
 }
@@ -426,11 +399,10 @@ pub fn until_step(args: &[Value]) -> Result<Value, FuncError> {
 
     // The loop itself is the bound here: a step that never reaches the end simply
     // stops, so what needs checking is how many values fit between the two.
-    crate::helm_functions::bounded_count(
+    crate::helm_functions::bounded_elements(
         end.saturating_sub(start)
             .saturating_div(step)
             .saturating_abs(),
-        "elements",
         "untilStep",
     )?;
     let mut result = Vec::new();
@@ -477,36 +449,10 @@ pub fn seq(args: &[Value]) -> Result<Value, FuncError> {
     } else {
         (start, end)
     };
-    crate::helm_functions::bounded_count(
-        to.saturating_sub(from).saturating_add(1),
-        "elements",
-        "seq",
-    )?;
+    crate::helm_functions::bounded_elements(to.saturating_sub(from).saturating_add(1), "seq")?;
     let result: Vec<Value> = (from..=to).map(|i| Value::Number(i.into())).collect();
 
     Ok(Value::Array(result))
-}
-
-/// Get the length of a list or string
-pub fn len_fn(args: &[Value]) -> Result<Value, FuncError> {
-    let value = args.first().ok_or(FuncError::ExactlyXArgs(
-        "This function requires exactly 1 argument.".to_string(),
-        1,
-    ))?;
-
-    let length = match value {
-        Value::Array(arr) => arr.len(),
-        Value::String(s) => s.len(),
-        Value::Map(m) => m.len(),
-        Value::Object(o) => o.len(),
-        _ => {
-            return Err(FuncError::Generic(
-                "Argument must be an array, string, or map".to_string(),
-            ))
-        }
-    };
-
-    Ok(Value::Number((length as i64).into()))
 }
 
 #[cfg(test)]
@@ -525,7 +471,7 @@ mod tests {
 
         let render = |source: &str| {
             let mut tmpl = Template::default();
-            tmpl.add_funcs(&HELM_FUNCTIONS);
+            tmpl.add_funcs(HELM_FUNCTIONS);
             tmpl.parse(source).expect("parses");
             tmpl.render(&Context::from(Value::Nil))
         };
@@ -624,19 +570,6 @@ mod tests {
         } else {
             panic!("Expected array");
         }
-    }
-
-    #[test]
-    fn test_len_fn() {
-        let list = Value::Array(vec![
-            Value::Number(1.into()),
-            Value::Number(2.into()),
-            Value::Number(3.into()),
-            Value::Number(4.into()),
-            Value::Number(5.into()),
-        ]);
-        let result = len_fn(&[list]).unwrap();
-        assert_eq!(result.to_string(), "5");
     }
 
     #[test]
@@ -741,17 +674,6 @@ mod tests {
         } else {
             panic!("Expected array");
         }
-    }
-
-    #[test]
-    fn test_index_list() {
-        let list = Value::Array(vec![
-            Value::String("a".to_string()),
-            Value::String("b".to_string()),
-            Value::String("c".to_string()),
-        ]);
-        let result = index_list(&[list, Value::Number(1.into())]).unwrap();
-        assert_eq!(result.to_string(), "b");
     }
 
     #[test]

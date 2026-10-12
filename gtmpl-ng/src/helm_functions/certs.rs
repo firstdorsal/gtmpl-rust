@@ -33,10 +33,9 @@ pub fn gen_ca(args: &[Value]) -> Result<Value, FuncError> {
 }
 
 fn new_ca(common_name: &str, days: &str) -> anyhow::Result<(Certificate, KeyPair)> {
-    let time_from_now = Duration::days(days.parse::<i64>()?);
     let mut params =
         CertificateParams::new(Vec::default()).expect("empty subject alt name can't produce error");
-    let (from, until) = validity_period(time_from_now);
+    let (from, until) = validity_period(days.parse::<i64>()?, "genCA")?;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params
         .distinguished_name
@@ -56,12 +55,35 @@ fn new_ca(common_name: &str, days: &str) -> anyhow::Result<(Certificate, KeyPair
     Ok((params.self_signed(&key_pair)?, key_pair))
 }
 
-fn validity_period(duration_from_now: Duration) -> (OffsetDateTime, OffsetDateTime) {
+/// Today, and today plus `days`, refusing a span that does not fit a date.
+///
+/// A template names the lifetime, so it can name any number, and two separate steps
+/// overflow before `OffsetDateTime`'s own range does: `Duration::days` multiplies by
+/// 86 400 and panics if that leaves `i64`, and adding the result to today leaves the
+/// supported year range long before. Both were unchecked -- `{{ genCA "x" 999999999 }}`
+/// panicked, out of a template literal, past the `Result` these functions return.
+fn validity_period(
+    days: i64,
+    function: &str,
+) -> Result<(OffsetDateTime, OffsetDateTime), FuncError> {
+    let too_long = || FuncError::InvalidValidity {
+        function: function.to_owned(),
+        days,
+    };
+    // Seconds are the unit `Duration` stores, so this constructor cannot overflow --
+    // unlike `Duration::days`, which does the same multiplication and panics.
+    let seconds = days.checked_mul(86_400).ok_or_else(too_long)?;
     let now = OffsetDateTime::now_utc();
-    let until = OffsetDateTime::now_utc()
-        .checked_add(duration_from_now)
-        .unwrap();
-    (now, until)
+    let until = now
+        .checked_add(Duration::seconds(seconds))
+        .ok_or_else(too_long)?;
+    // `OffsetDateTime` reaches further than an X.509 date: the ASN.1 writer asserts
+    // the year is within 0..=9999 and panics outside it, so a validity that lands
+    // there -- `{{ genCA "x" -800000 }}` is year -164 -- has to be refused here.
+    if !(0..=9999).contains(&until.year()) {
+        return Err(too_long());
+    }
+    Ok((now, until))
 }
 
 /// Parse a CA certificate from PEM and rebuild it with rcgen for signing
@@ -197,7 +219,7 @@ pub fn gen_signed_cert(args: &[Value]) -> Result<Value, FuncError> {
     let mut own_cert_params: CertificateParams = rcgen::CertificateParams::new(alt_names)
         .map_err(|e| FuncError::Generic(format!("Error generating certificate params: {}", e)))?;
 
-    own_cert_params.not_after = validity_period(Duration::days(days.into())).1;
+    own_cert_params.not_after = validity_period(days.into(), "genSignedCert")?.1;
     own_cert_params
         .distinguished_name
         .push(DnType::CommonName, common_name.clone());
@@ -287,7 +309,7 @@ pub fn gen_self_signed_cert(args: &[Value]) -> Result<Value, FuncError> {
     let mut cert_params: CertificateParams = rcgen::CertificateParams::new(alt_names)
         .map_err(|e| FuncError::Generic(format!("Error generating certificate params: {}", e)))?;
 
-    cert_params.not_after = validity_period(Duration::days(days.into())).1;
+    cert_params.not_after = validity_period(days.into(), "genSelfSignedCert")?.1;
 
     cert_params
         .distinguished_name

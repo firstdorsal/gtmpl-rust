@@ -12,8 +12,8 @@ implementation that turns a struct into a template context.
 
 ```toml
 [dependencies]
-gtmpl_derive_ng = "0.10"
-gtmpl_value_ng = "0.10"
+gtmpl_derive_ng = "1"
+gtmpl_value_ng = "1"
 ```
 
 Builds on Rust 1.85 and newer, which CI checks on that exact toolchain.

@@ -294,7 +294,6 @@ impl Parser {
         };
         if let Some(tree) = self.tree.as_mut() {
             tree.root = Some(Nodes::List(ListNode::new(
-                id,
                 t.pos,
                 t.line,
                 t.col,
@@ -396,7 +395,7 @@ impl Parser {
         let line = peeked.line;
         let col = peeked.col;
         let len = peeked.val.len();
-        let mut list = ListNode::new(self.tree_id, pos, line, col, len);
+        let mut list = ListNode::new(pos, line, col, len);
         while self.peek_non_space_must("item list")?.typ != ItemType::ItemEOF {
             let node = self.text_or_action()?;
             match *node.typ() {
@@ -412,7 +411,6 @@ impl Parser {
     fn text_or_action(&mut self) -> Result<Nodes, ParseError> {
         match self.next_non_space() {
             Some(ref item) if item.typ == ItemType::ItemText => Ok(Nodes::Text(TextNode::new(
-                self.tree_id,
                 item.pos,
                 item.line,
                 item.col,
@@ -452,14 +450,7 @@ impl Parser {
             "action and pipeline start at the same token"
         );
         let len = pipe.len();
-        Ok(Nodes::Action(ActionNode::new(
-            self.tree_id,
-            pos,
-            line,
-            col,
-            len,
-            pipe,
-        )))
+        Ok(Nodes::Action(ActionNode::new(pos, line, col, len, pipe)))
     }
 
     fn parse_control(
@@ -503,13 +494,8 @@ impl Parser {
             NodeType::Else => {
                 if allow_else_if && self.peek_must("else if")?.typ == ItemType::ItemIf {
                     self.next_must("else if")?;
-                    let mut else_list = ListNode::new(
-                        self.tree_id,
-                        next.pos(),
-                        next.line(),
-                        next.col(),
-                        next.len(),
-                    );
+                    let mut else_list =
+                        ListNode::new(next.pos(), next.line(), next.col(), next.len());
                     else_list.append(self.if_control()?);
                     let else_list = finish_list(else_list);
                     // `else if` shares the enclosing `{{end}}`, which the nested `if`
@@ -566,24 +552,17 @@ impl Parser {
         if token.typ != ItemType::ItemRightDelim {
             return self.error(&format!("unexpected {:?} in {{{{{name}}}}}", token.val));
         }
-        let (tree, pos, line, col, len) = (
-            self.tree_id,
-            keyword.pos,
-            keyword.line,
-            keyword.col,
-            keyword.val.len(),
-        );
+        let (pos, line, col, len) = (keyword.pos, keyword.line, keyword.col, keyword.val.len());
         Ok(if breaking {
-            Nodes::Break(BreakNode::new(tree, pos, line, col, len))
+            Nodes::Break(BreakNode::new(pos, line, col, len))
         } else {
-            Nodes::Continue(ContinueNode::new(tree, pos, line, col, len))
+            Nodes::Continue(ContinueNode::new(pos, line, col, len))
         })
     }
 
     fn end_control(&mut self) -> Result<Nodes, ParseError> {
         let token = self.expect(&ItemType::ItemRightDelim, "end")?;
         Ok(Nodes::End(EndNode::new(
-            self.tree_id,
             token.pos,
             token.line,
             token.col,
@@ -628,7 +607,6 @@ impl Parser {
         }
         self.stop_parse()?;
         Ok(Nodes::Template(TemplateNode::new(
-            self.tree_id,
             token.pos,
             token.line,
             token.col,
@@ -685,13 +663,7 @@ impl Parser {
             (None, _) => token_len,
         };
         Ok(Nodes::Template(TemplateNode::new(
-            self.tree_id,
-            token.pos,
-            token.line,
-            token.col,
-            len,
-            name,
-            pipe,
+            token.pos, token.line, token.col, len, name, pipe,
         )))
     }
 
@@ -703,7 +675,10 @@ impl Parser {
         let line = token.line;
         let col = token.col;
         let len = token.val.len();
-        // TODO: test this hard!
+        // The declaration and assignment forms this parses are pinned end to end in
+        // tests/go_conformance.txt against real Go: `:=`, `=` without a declaration,
+        // reassignment from inside a range body, two-variable range declarations,
+        // and the too-many-declarations refusal.
         if token.typ == ItemType::ItemVariable {
             while token.typ == ItemType::ItemVariable {
                 let token_after_var = self.next_must("variable")?;
@@ -725,7 +700,6 @@ impl Parser {
                     || (next.typ == ItemType::ItemChar && next.val == ",")
                 {
                     let variable = VariableNode::new(
-                        self.tree_id,
                         token.pos,
                         token.line,
                         token.col,
@@ -740,7 +714,7 @@ impl Parser {
                             token = self.next_non_space_must("variable")?;
                             continue;
                         }
-                        return self.error(&format!("to many decalarations in {}", context));
+                        return self.error(&format!("too many declarations in {}", context));
                     }
                 } else {
                     self.backup2(token, next);
@@ -750,7 +724,7 @@ impl Parser {
         } else {
             self.backup(token);
         }
-        let mut pipe = PipeNode::new(self.tree_id, pos, line, col, len, decl);
+        let mut pipe = PipeNode::new(pos, line, col, len, decl);
         pipe.is_assign = is_assign;
         let mut token = self.next_non_space_must("pipeline")?;
         loop {
@@ -825,7 +799,7 @@ impl Parser {
         let line = peeked.line;
         let col = peeked.col;
         let len = peeked.val.len();
-        let mut cmd = CommandNode::new(self.tree_id, pos, line, col, len);
+        let mut cmd = CommandNode::new(pos, line, col, len);
         loop {
             self.peek_non_space_must("operand")?;
             if let Some(operand) = self.operand()? {
@@ -876,14 +850,8 @@ impl Parser {
                     let base_pos = n.pos();
                     let base_line = n.line();
                     let base_col = n.col();
-                    let mut chain = ChainNode::new(
-                        self.tree_id,
-                        base_pos,
-                        base_line,
-                        base_col,
-                        next.val.len(),
-                        n,
-                    );
+                    let mut chain =
+                        ChainNode::new(base_pos, base_line, base_col, next.val.len(), n);
                     // Track the end of the last field token. The span cannot be taken
                     // from `to_string()`: a node does not re-render to the source it was
                     // parsed from, and `FieldNode` in particular drops the leading dot.
@@ -903,20 +871,10 @@ impl Parser {
                     let chain_len = chain.len();
                     let n = match typ {
                         NodeType::Field => Nodes::Field(FieldNode::new(
-                            self.tree_id,
-                            base_pos,
-                            base_line,
-                            base_col,
-                            chain_len,
-                            &chain_str,
+                            base_pos, base_line, base_col, chain_len, &chain_str,
                         )),
                         NodeType::Variable => Nodes::Variable(VariableNode::new(
-                            self.tree_id,
-                            base_pos,
-                            base_line,
-                            base_col,
-                            chain_len,
-                            &chain_str,
+                            base_pos, base_line, base_col, chain_len, &chain_str,
                         )),
                         _ => Nodes::Chain(chain),
                     };
@@ -943,38 +901,19 @@ impl Parser {
                     token.val,
                 ))
             }
-            ItemType::ItemDot => Nodes::Dot(DotNode::new(
-                self.tree_id,
-                token.pos,
-                token.line,
-                token.col,
-                token_len,
-            )),
-            ItemType::ItemNil => Nodes::Nil(NilNode::new(
-                self.tree_id,
-                token.pos,
-                token.line,
-                token.col,
-                token_len,
-            )),
-            ItemType::ItemVariable => Nodes::Variable(self.use_var(
-                self.tree_id,
-                token.pos,
-                token.line,
-                token.col,
-                token_len,
-                &token.val,
-            )?),
+            ItemType::ItemDot => {
+                Nodes::Dot(DotNode::new(token.pos, token.line, token.col, token_len))
+            }
+            ItemType::ItemNil => {
+                Nodes::Nil(NilNode::new(token.pos, token.line, token.col, token_len))
+            }
+            ItemType::ItemVariable => Nodes::Variable(
+                self.use_var(token.pos, token.line, token.col, token_len, &token.val)?,
+            ),
             ItemType::ItemField => Nodes::Field(FieldNode::new(
-                self.tree_id,
-                token.pos,
-                token.line,
-                token.col,
-                token_len,
-                &token.val,
+                token.pos, token.line, token.col, token_len, &token.val,
             )),
             ItemType::ItemBool => Nodes::Bool(BoolNode::new(
-                self.tree_id,
                 token.pos,
                 token.line,
                 token.col,
@@ -983,13 +922,7 @@ impl Parser {
             )),
             ItemType::ItemCharConstant | ItemType::ItemNumber => {
                 match NumberNode::new(
-                    self.tree_id,
-                    token.pos,
-                    token.line,
-                    token.col,
-                    token_len,
-                    token.val,
-                    &token.typ,
+                    token.pos, token.line, token.col, token_len, token.val, &token.typ,
                 ) {
                     Ok(n) => Nodes::Number(n),
                     Err(e) => return self.error(&e.to_string()),
@@ -1018,13 +951,7 @@ impl Parser {
             ItemType::ItemString | ItemType::ItemRawString => {
                 if let Some(s) = unquote_str(&token.val) {
                     Nodes::String(StringNode::new(
-                        self.tree_id,
-                        token.pos,
-                        token.line,
-                        token.col,
-                        token_len,
-                        token.val,
-                        s,
+                        token.pos, token.line, token.col, token_len, token.val, s,
                     ))
                 } else {
                     return self.error(&format!("unable to unqote string: {}", token.val));
@@ -1041,7 +968,6 @@ impl Parser {
 
     fn use_var(
         &self,
-        tree_id: TreeId,
         pos: Pos,
         line: usize,
         col: usize,
@@ -1049,7 +975,7 @@ impl Parser {
         name: &str,
     ) -> Result<VariableNode, ParseError> {
         if name == "$" {
-            return Ok(VariableNode::new(tree_id, pos, line, col, len, name));
+            return Ok(VariableNode::new(pos, line, col, len, name));
         }
         self.tree
             .as_ref()
@@ -1057,7 +983,7 @@ impl Parser {
                 t.vars
                     .iter()
                     .find(|&v| v == name)
-                    .map(|_| VariableNode::new(tree_id, pos, line, col, len, name))
+                    .map(|_| VariableNode::new(pos, line, col, len, name))
             })
             .ok_or_else(|| self.error_msg(&format!("undefined variable {}", name)))
     }

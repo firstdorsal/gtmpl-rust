@@ -16,7 +16,7 @@ function set that the original does not have.
 
 ```toml
 [dependencies]
-gtmpl-ng = "0.10"
+gtmpl-ng = "1"
 ```
 
 Rendering a template needs nothing else — `Value`, `Func`, `FuncError` and the rest are
@@ -24,10 +24,10 @@ re-exported from `gtmpl-ng` itself. Two optional crates:
 
 ```toml
 [dependencies]
-gtmpl-ng = { version = "0.10", features = ["helm-functions"] }
+gtmpl-ng = { version = "1", features = ["helm-functions"] }
 # only for #[derive(Gtmpl)], to use your own structs as a context
-gtmpl_derive_ng = "0.10"
-gtmpl_value_ng = "0.10"
+gtmpl_derive_ng = "1"
+gtmpl_value_ng = "1"
 ```
 
 ## Hello world
@@ -49,9 +49,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-gtmpl-ng = { version = "0.10", features = ["all-functions", "gtmpl_dynamic_template"] }
-gtmpl_derive_ng = "0.10"
-gtmpl_value_ng = "0.10"
+gtmpl-ng = { version = "1", features = ["all-functions", "gtmpl_dynamic_template"] }
+gtmpl_derive_ng = "1"
+gtmpl_value_ng = "1"
 ```
 
 ```rust
@@ -167,7 +167,7 @@ fn main() {
         "web   |003|1.50|\"web\""
     );
 
-    // The Helm function set: 152 functions, including the pipeline staples.
+    // The Helm function set: 150 functions, including the pipeline staples.
     assert_eq!(render("{{ .name | upper | quote }}"), "\"WEB\"");
     assert_eq!(render("{{ .ports | first }}"), "80");
     assert_eq!(render("{{ toYaml .ports }}"), "- 80\n- 443\n");
@@ -234,7 +234,7 @@ a time with `add_func`. Each feature works on its own — `helm-functions` witho
 `mows-functions`, or neither.
 
 ```rust
-use gtmpl_ng::helm_functions::HELM_FUNCTIONS; // [(&str, Func); 152], needs `helm-functions`
+use gtmpl_ng::helm_functions::HELM_FUNCTIONS; // &[(&str, Func)], needs `helm-functions`
 use gtmpl_ng::mows_functions::MOWS_FUNCTIONS; // [(&str, Func); 3], needs `mows-functions`
 use gtmpl_ng::{Context, FuncError, Template, Value};
 
@@ -258,15 +258,155 @@ assert_eq!(tmpl.render(&Context::from(Value::Map(data))).unwrap(), "WEB!");
 both sets as one `Vec<(&str, Func)>` for a single `add_funcs` call — that is the one the
 example above uses.
 
-Without any feature you still have everything Go itself provides: `printf`, `len`,
-`index`, `eq`, `ne`, `lt`, `and`, `or`, `not`, `call`, `print`, `println`.
+Without any feature you still have every builtin Go itself provides: `and`, `call`,
+`eq`, `ge`, `gt`, `html`, `index`, `js`, `le`, `len`, `lt`, `ne`, `not`, `or`,
+`print`, `printf`, `println`, `slice` and `urlquery`.
+
+## Rendering templates you did not write
+
+If the templates come from your own repository, skip this. If a template can arrive from
+somewhere else — a chart a user uploads, a notification body someone edits in a web form,
+a dashboard panel — then **the template is untrusted input**, and that is worth a moment.
+
+The engine has no I/O to abuse: no filesystem, no network, no environment, no
+subprocesses, and the function set deliberately omits Sprig's `env`, `expandenv` and
+`getHostByName`. What a hostile template can do instead is make your process spend what
+it does not have. Four one-line templates used to be enough to end it:
+
+| Template | Before |
+|---|---|
+| `{{define "r"}}{{template "r" .}}{{end}}{{template "r" .}}` | stack overflow, `SIGABRT` |
+| `{{range 1000000000}}{{end}}` | ran until killed |
+| `{{range 100000}}{{repeat 1000000 "x"}}{{end}}` | allocator failed, `SIGABRT` |
+| `{{range 10000}}{{range 10000}}{{range 10000}}{{end}}{{end}}{{end}}` | ran until killed |
+
+None of them could be caught, because an overflowed stack and a failed allocation abort
+the process rather than return — the `Result` was never reached. Every one of them is now
+an ordinary error, and the defaults that make it so are these:
+
+| `Limits` field | Default | Bounds |
+|---|---|---|
+| `iterations` | 10 000 | one `{{range N}}`, and one `until` / `untilStep` / `seq` |
+| `total_iterations` | 1 000 000 | every loop in the render together, so nesting cannot multiply |
+| `output_bytes` | 64 MiB | what the render writes |
+| `function_output` | 1 000 000 | characters from one `repeat`, `indent` or `rand*` |
+| `deadline` | *none* | how long one render may take — opt-in, see below |
+
+They are sized for templates a human wrote: measured on the author's deployment corpus
+of 157 templates, the 149 deterministic ones render byte-identical to the unlimited
+0.10.1, and the deepest does not pass 8 levels of nesting. Raise
+the one you need, and the others stay where they are:
+
+```rust
+use gtmpl_ng::{Context, Limits, Template};
+
+// A report that legitimately loops further than the default allows.
+let mut tmpl = Template::with_limits(Limits::default().with_iterations(50_000));
+tmpl.parse("{{ range 20000 }}.{{ end }}").unwrap();
+assert_eq!(tmpl.render(&Context::empty()).unwrap().len(), 20_000);
+
+// Or opt out entirely, for templates that are all your own.
+let mut tmpl = Template::with_limits(Limits::unlimited());
+tmpl.parse("{{ range 2000000 }}{{ end }}").unwrap();
+assert_eq!(tmpl.render(&Context::empty()).unwrap(), "");
+
+// The default refuses that same loop rather than running it.
+let mut tmpl = Template::default();
+tmpl.parse("{{ range 2000000 }}{{ end }}").unwrap();
+assert!(tmpl.render(&Context::empty()).is_err());
+```
+
+### Time is the fifth limit, and it is opt-in
+
+The four counters above bound memory and stack, because those are what end a process. They
+do not bound time, and the gap is measurable. This template is inside every default:
+
+```text
+{{ range 100 }}{{ range 10000 }}{{ len (repeat 1000000 "x") }}{{ end }}{{ end }}
+```
+
+It spends the whole million-iteration budget on bodies that each build a megabyte and throw
+it away, and runs for **13.8 seconds** before `total_iterations` stops it. Worse is flat:
+
+```text
+{{ range 10000 }}{{ htpasswd "u" "p" }}{{ end }}
+```
+
+is 10 000 bcrypt hashes at ~165 ms each — measured on the author's machine, a
+**27-minute render that succeeds**,
+with 20 000 bytes of output and every counter far from its limit, because bcrypt's cost is
+time by design. Every count in both templates is allowed; no counter has anything to say
+about how long they take.
+
+`deadline` covers that, and it is **off by default on purpose**. Every other limit counts
+something the template asked for, so the same template gives the same answer on any
+machine; a deadline makes a render fail on a loaded host and succeed on an idle one. That
+is the right trade when the templates are not yours, and the wrong one as a default:
+
+```rust
+use gtmpl_ng::{Context, Limits, Template};
+use std::time::Duration;
+
+// `unlimited` here so that the deadline is plainly what stops this, and not one of
+// the counters -- in a real program you would keep the counters and add the deadline.
+let mut tmpl = Template::with_limits(Limits::unlimited().with_deadline(Duration::from_millis(50)));
+tmpl.parse("{{ range 100000000 }}{{ end }}").unwrap();
+let error = tmpl.render(&Context::empty()).unwrap_err();
+assert!(error.to_string().contains("did not finish within"));
+// The template above stops at 2.00 s under a two-second deadline, against 13.8 s unbounded.
+
+// Every limit is independent, so the usual shape is the defaults plus a deadline.
+let guarded = Limits::default().with_deadline(Duration::from_secs(5));
+assert_eq!(guarded.iterations, Some(10_000));
+```
+
+The clock starts at each `render`, so a cached template does not arrive with its deadline
+spent. It is checked before every function call and on every 64th iteration, which costs
+nothing measurable — 27.0 ns per iteration against 26.9 without a deadline — and stops a
+render within a fraction of a millisecond of its deadline. What it cannot do is interrupt
+a single call: one `genCA` runs to its end, and the deadline stops the next one. A custom
+function that works in pieces can read `gtmpl_ng::limits::remaining()`.
+
+To take control back mid-call, render on a thread and abandon it — `Template`, `Context`
+and `Value` are `Send`, so this works today with no help from the engine:
+
+```rust,no_run
+use gtmpl_ng::{Context, Limits, Template, Value};
+use std::sync::mpsc;
+use std::time::Duration;
+
+let budget = Duration::from_millis(500);
+let (sender, receiver) = mpsc::channel();
+std::thread::spawn(move || {
+    let mut tmpl = Template::with_limits(Limits::default().with_deadline(budget));
+    tmpl.parse("{{ range 100 }}x{{ end }}").unwrap();
+    // The receiver may be gone by now; that is the abandoned case.
+    let _ = sender.send(tmpl.render(&Context::empty()));
+});
+let rendered = receiver.recv_timeout(budget);
+// Timed out? Control is back here immediately. The thread finishes its one
+// in-flight call and exits on the deadline — measured against the worst case in
+// the registry (`htpasswd`, one ~165 ms bcrypt hash), it outlived the caller's
+// timeout by 159 ms, burning its core only that long.
+```
+
+### Recursion is not a knob
+
+`{{template}}` nesting and nested actions are capped together at 100 levels, measured
+against the smallest stack a caller realistically has. `Limits::unlimited()` does not lift
+it: there is no value above it that is safe, so offering the choice would only offer a way
+to abort the process.
+
+A custom function can read the limits in force with `gtmpl_ng::limits::active()`. Do that
+if your function turns a number from the template into an allocation, or
+`{{ myFunc 9999999999 }}` becomes a way around all of the above.
 
 ## Feature flags
 
 | flag | what it adds |
 |---|---|
 | *(none)* | the engine and the built-in functions Go has: `printf`, `len`, `index`, `eq`, `and`, `call`, … |
-| `helm-functions` | 152 Helm-compatible functions — `upper`, `toYaml`, `b64enc`, `sha256sum`, `trunc`, `default`, … |
+| `helm-functions` | 150 Helm-compatible functions — `upper`, `toYaml`, `b64enc`, `sha256sum`, `trunc`, `default`, … |
 | `mows-functions` | 3 more: `mowsRandomString`, `mowsDigest`, `mowsJoinDomain` |
 | `all-functions` | both of the above, and `all_functions()` to register them in one call |
 | `gtmpl_dynamic_template` | `{{ template (pipeline) }}`, so the template name can be computed |
@@ -292,17 +432,18 @@ Rust 1.85, which CI checks on that exact toolchain.
   instead.
 - **Map keys are iterated in sorted order**, so the same input always renders the same
   bytes.
-- **A generating function is capped at a million.** `repeat`, `until`, `seq`,
-  `indent` and the `rand*` family refuse a larger count instead of allocating for it,
-  so a template cannot exhaust memory by asking.
-- **Numbers compare permissively.** `{{ eq 3.0 3 }}` answers `true` where Go refuses
-  with "incompatible types for comparison".
+- **A render is bounded by default**, so a template cannot exhaust memory or run
+  forever. The numbers are in [Rendering templates you did not
+  write](#rendering-templates-you-did-not-write), and they are adjustable.
+- **Comparison is permissive.** `{{ eq 3.0 3 }}` answers `true` and `{{ eq "a" 1 }}`
+  answers `false` where Go refuses with "incompatible types for comparison". The
+  engine README lists every deliberate difference from Go.
 
 ## Where to read more
 
 - **[The engine's README](gtmpl-ng/README.md)** — the template semantics in full, the
-  dynamic-template syntax, and the list of Go features that are still missing.
-- **[`go_conformance.txt`](gtmpl-ng/tests/go_conformance.txt)** — 237 templates diffed
+  dynamic-template syntax, and the full list of deliberate differences from Go.
+- **[`go_conformance.txt`](gtmpl-ng/tests/go_conformance.txt)** — 442 templates diffed
   against real Go 1.26.8, with each deliberate difference and its reason. This is the
   specification `printf` is held to.
 - **[CHANGES.md](CHANGES.md)** — all three crates.

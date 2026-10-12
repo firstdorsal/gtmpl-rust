@@ -1,4 +1,3 @@
-use crate::node::{CommandNode, Nodes, PipeNode};
 use gtmpl_value_ng::{FuncError, Value};
 use std::{fmt, string::FromUtf8Error};
 use thiserror::Error;
@@ -9,6 +8,7 @@ use thiserror::Error;
 /// Together they delimit the construct that failed, which is what makes
 /// `line[col - 1..col - 1 + len]` the offending expression.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ErrorContext {
     /// Name of the template the error came from; empty for an unnamed one.
     pub name: String,
@@ -36,6 +36,7 @@ impl fmt::Display for ErrorContext {
 
 /// A structured error with location and optional cause chain
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct StructuredError {
     pub context: ErrorContext,
     pub message: String,
@@ -103,7 +104,7 @@ impl fmt::Display for StructuredError {
 #[non_exhaustive]
 pub enum ParseError {
     #[error("unexpected {0} in define clause")]
-    UnexpectedInDefineClause(Box<Nodes>),
+    UnexpectedInDefineClause(String),
     #[error("unexpected end")]
     UnexpectedEnd,
     #[error("template nested more than {0} levels deep")]
@@ -141,6 +142,7 @@ impl ParseError {
 }
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum NodeError {
     #[error("unable to unquote")]
     UnquoteError,
@@ -161,9 +163,9 @@ pub enum ExecError {
     #[error("{0}")]
     IOError(#[from] std::io::Error),
     #[error("unknown node: {0}")]
-    UnknownNode(Box<Nodes>),
+    UnknownNode(String),
     #[error("expected if or with node, got {0}")]
-    ExpectedIfOrWith(Box<Nodes>),
+    ExpectedIfOrWith(String),
     #[error("unable to convert output to uft-8: {0}")]
     Utf8ConversionFailed(FromUtf8Error),
     #[error("empty var stack")]
@@ -181,14 +183,33 @@ pub enum ExecError {
     PipelineMustYieldString,
     #[error("template {0} not defined")]
     TemplateNotDefined(String),
-    #[error("exceeded max template depth")]
-    MaxTemplateDepth,
+    #[error("exceeded the maximum template nesting depth of {limit}")]
+    #[non_exhaustive]
+    MaxTemplateDepth { limit: usize },
+    #[error("range over {asked} is more than the {limit} iterations allowed")]
+    #[non_exhaustive]
+    RangeTooLong { asked: i64, limit: usize },
+    #[error("the render would run more than the {limit} iterations allowed")]
+    #[non_exhaustive]
+    TooManyIterations { limit: usize },
+    #[error("the render would write more than the {limit} bytes allowed")]
+    #[non_exhaustive]
+    OutputTooLarge { limit: usize },
+    #[error("a function produced a value larger than the {limit} allowed")]
+    #[non_exhaustive]
+    ValueTooLarge { limit: usize },
+    #[error("a function produced a value nested deeper than the {limit} levels allowed")]
+    #[non_exhaustive]
+    ValueTooDeep { limit: usize },
+    #[error("the render did not finish within {deadline:?}")]
+    #[non_exhaustive]
+    DeadlineExceeded { deadline: std::time::Duration },
     #[error("error evaluating pipe: {0}")]
-    ErrorEvaluatingPipe(Box<PipeNode>),
+    ErrorEvaluatingPipe(String),
     #[error("no arguments for command node: {0}")]
-    NoArgsForCommandNode(CommandNode),
+    NoArgsForCommandNode(String),
     #[error("cannot evaluate command: {0}")]
-    CannotEvaluateCommand(Box<Nodes>),
+    CannotEvaluateCommand(String),
     #[error("field chain without fields :/")]
     FieldChainWithoutFields,
     #[error("{0} has arguments but cannot be invoked as function")]
@@ -196,13 +217,13 @@ pub enum ExecError {
     #[error("no fields in eval_chain_node")]
     NoFieldsInEvalChainNode,
     #[error("cannot handle {0} as argument")]
-    InvalidArgument(Box<Nodes>),
+    InvalidArgument(String),
     #[error("{0} is not a defined function")]
     UndefinedFunction(String),
     #[error(transparent)]
     FuncError(#[from] FuncError),
     #[error("can't give argument to non-function {0}")]
-    ArgumentForNonFunction(Box<Nodes>),
+    ArgumentForNonFunction(String),
     #[error("only maps and objects have fields")]
     OnlyMapsAndObjectsHaveFields,
     #[error("no field `{0}` in {1}")]
@@ -263,6 +284,7 @@ impl ExecError {
 }
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum TemplateError {
     #[error(transparent)]
     ExecError(#[from] ExecError),

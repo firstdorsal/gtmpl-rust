@@ -155,11 +155,12 @@ pub fn repeat(args: &[Value]) -> Result<Value, FuncError> {
     // The product is what allocates, so bound that rather than the count: a hundred
     // repeats of a megabyte is the same memory as a million repeats of a byte.
     let total = times.saturating_mul(value.len());
-    if total > crate::helm_functions::TOO_MANY {
-        return Err(FuncError::Generic(format!(
-            "repeat: {total} characters is more than the {} this allows",
-            crate::helm_functions::TOO_MANY
-        )));
+    if let Some(limit) = crate::limits::active().function_output {
+        if total > limit {
+            return Err(FuncError::Generic(format!(
+                "repeat: {total} characters is more than the {limit} this allows"
+            )));
+        }
     }
     let value = value.repeat(times);
     Ok(Value::from(value))
@@ -566,6 +567,24 @@ pub fn indent(args: &[Value]) -> Result<Value, FuncError> {
     let value = value.to_string();
 
     let indent = crate::helm_functions::bounded_count(indent as i64, "spaces", "indent")?;
+
+    // The spaces multiply per line, so the product is the allocation and has to be
+    // judged *before* it: a million spaces onto a value of a hundred thousand
+    // newlines is 10^11 bytes out of two arguments that each pass their own check.
+    let line_count = value.split('\n').count();
+    let total = indent
+        .saturating_mul(line_count)
+        .saturating_add(value.len());
+    if let Some(limit) = crate::limits::active().function_output {
+        if total > limit {
+            return Err(FuncError::TooMuchOutput {
+                function: "indent".to_owned(),
+                count: total,
+                what: "characters".to_owned(),
+                limit,
+            });
+        }
+    }
     let indent_string = " ".repeat(indent);
 
     let mut result = String::new();
@@ -598,6 +617,27 @@ pub fn replace(args: &[Value]) -> Result<Value, FuncError> {
         3,
     ))?;
     let value = value.to_string();
+
+    // Each match grows the value by the replacement's length, so the product is the
+    // allocation: replacing one character with a million-character string in a
+    // million-character value is 10^12 bytes out of three arguments that are each
+    // inside every limit. Counting matches allocates nothing.
+    if new.len() > old.len() {
+        let matches = value.matches(&old).count();
+        let total = matches
+            .saturating_mul(new.len() - old.len())
+            .saturating_add(value.len());
+        if let Some(limit) = crate::limits::active().function_output {
+            if total > limit {
+                return Err(FuncError::TooMuchOutput {
+                    function: "replace".to_owned(),
+                    count: total,
+                    what: "characters".to_owned(),
+                    limit,
+                });
+            }
+        }
+    }
     let result = value.replace(&old, &new);
     Ok(Value::from(result))
 }
