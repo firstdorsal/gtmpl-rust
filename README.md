@@ -61,13 +61,21 @@ use gtmpl_ng::{gtmpl_fn, template, Context, Func, FuncError, Function, NumberKin
 use std::collections::HashMap;
 
 // Any struct can be a template context. Every field is converted with `Into<Value>`,
-// so a field type only has to implement that.
+// so a field type only has to implement that -- including another derived struct, or a
+// `Vec` or `HashMap` of one. None of them has to be `Clone`.
+#[derive(Gtmpl)]
+struct Container {
+    name: String,
+    image: String,
+}
+
 #[derive(Gtmpl)]
 struct Service {
     name: String,
     replicas: u8,
     ports: Vec<u16>,
     tags: Vec<String>,
+    containers: Vec<Container>,
     labels: HashMap<String, String>,
     // A function field is callable from the template as `{{ .url }}`. It receives the
     // struct it lives on as its only argument and cannot take arguments of its own.
@@ -101,6 +109,10 @@ fn main() {
         replicas: 3,
         ports: vec![80, 443],
         tags: Vec::new(),
+        containers: vec![
+            Container { name: "nginx".to_owned(), image: "nginx:1.27".to_owned() },
+            Container { name: "sidecar".to_owned(), image: "envoy:1.31".to_owned() },
+        ],
         labels: [("tier".to_owned(), "frontend".to_owned())]
             .into_iter()
             .collect(),
@@ -128,6 +140,12 @@ fn main() {
 
     // range, if/else, with
     assert_eq!(render("{{ range .ports }}:{{ . }}{{ end }}"), ":80:443");
+    // Ranging over a list of structs: dot is each struct in turn, so its fields read
+    // as they do at the top level.
+    assert_eq!(
+        render("{{ range .containers }}{{ .name }}={{ .image }} {{ end }}"),
+        "nginx=nginx:1.27 sidecar=envoy:1.31 "
+    );
     assert_eq!(render("{{ if gt .replicas 1 }}ha{{ else }}single{{ end }}"), "ha");
     assert_eq!(render("{{ with .labels.tier }}{{ . }}{{ end }}"), "frontend");
     // `else` on a range runs when the collection is empty.
