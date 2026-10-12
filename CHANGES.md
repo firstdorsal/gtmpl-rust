@@ -2,6 +2,233 @@
 
 All three crates in this repository share one version and are released together.
 
+## [1.0.0] - 2026-10-12
+
+A template is not always written by the program that renders it. When it can arrive
+from a user, the template itself is untrusted input, and this release is first about
+what a hostile one could do with that. The engine has no I/O to abuse — no filesystem,
+network, environment or subprocesses, and no `env`, `expandenv` or `getHostByName` —
+so what was left was making the host spend what it does not have.
+
+It is 1.0 because the surface is now something a freeze can carry: `Limits` can grow
+without a major release, the last two missing Go builtins (`html`, `js`) exist and are
+pinned against real Go byte for byte, the conformance fixture grew from 294 to 442
+cases and covers every builtin, and the differences from Go that remain are deliberate,
+documented in `tests/go_conformance.txt`'s header and the README, and pinned as cases
+so changing one is a conscious edit.
+
+### Security
+
+- **Four one-line templates ended the process.** Each one went past the `Result` the
+  API returns, because an overflowed stack and a failed allocation abort rather than
+  return, so no caller could have caught any of them:
+
+  | Template | What happened |
+  |---|---|
+  | `{{define "r"}}{{template "r" .}}{{end}}{{template "r" .}}` | stack overflow, `SIGABRT` |
+  | `{{range 1000000000}}{{end}}` | ran until killed |
+  | `{{range 100000}}{{repeat 1000000 "x"}}{{end}}` | allocator failed, `SIGABRT` |
+  | `{{range 10000}}{{range 10000}}{{range 10000}}{{end}}{{end}}{{end}}` | ran until killed |
+
+  All four are now ordinary errors, held by `tests/malicious_templates.rs` — which is
+  deliberately ungated, so a plain `cargo test` runs the file that proves a hostile
+  template cannot take the process down.
+
+- **`genCA`, `genSelfSignedCert` and `genSignedCert` panicked on a large validity.**
+  A template names a certificate's lifetime in days and can name any number.
+  `{{ genCA "x" 999999999 }}` pushed the date past what `OffsetDateTime` holds and hit
+  an `unwrap`; a few quintillion overflowed the multiplication inside `Duration::days`,
+  which panics by documented contract. Both are refused now, and
+  `tests/panic_regressions.rs` covers all three functions.
+
+- **Nesting depth is bounded, and the bound is measured.** The previous limit of
+  100 000 was Go's own, which Go can afford because a goroutine stack grows on demand;
+  ours does not, so the stack died at a fraction of it and the counter was never
+  reached. The new limit counts every nested body rather than only `{{template}}`
+  calls, because a body of sixty nested `{{if}}` reaches the same stack usage at a
+  fortieth of the template depth — any value safe for one shape was useless or fatal
+  for the other. It is set to 100 against a worst case measured at 220: an unoptimised
+  build on a 2 MiB stack, which is what `std::thread`, a Tokio worker and the test
+  harness all give. Of the 157 deployment templates this engine renders in production,
+  the deepest does not pass 8.
+
+- **A value could grow past every limit by passing through a variable.**
+  `{{ $s := "x" }}{{ range 40 }}{{ $s = print $s $s }}{{ end }}` doubles per iteration
+  and reaches 2^43 bytes inside forty of them -- every counter content, the allocator
+  abort uncatchable. Every such growth passes through a function call, so the result
+  of every call is now weighed (string bytes plus container elements) against
+  `function_output`, and its nesting depth against a fixed cap of 128 that
+  `Limits::unlimited()` does not lift -- a deep value is stack usage in every
+  recursive walk, measured as an abort at 10 001 levels on a 2 MiB thread.
+
+- **`indent` and `replace` multiplied without a bound.** Each input passed its own
+  check and the product -- spaces times lines, matches times replacement -- was
+  allowed to reach 10^11 bytes before any refusal. Both now judge the product before
+  allocating, like `repeat` always has.
+
+- **`{{template}}` fan-out ran until killed.** Calls were not counted, so two calls
+  per level made 2^40 of them inside a nesting depth of 40, with no loop and no
+  output: every counter stayed at zero. A template call now draws on
+  `total_iterations` like a loop iteration.
+
+- **A negative certificate validity aborted the process.** The 0.11 fix bounded the
+  overflow direction; `{{ genCA "x" -800000 }}` lands in year -164, which the ASN.1
+  writer refuses with an assert. The validity now has to land in years 0-9999.
+
+- **`{{range N}}` could bypass its limit on 32-bit targets**, where a count past
+  `usize` skipped the comparison instead of failing it.
+
+- **`urlquery` let the query-string characters through.** It escaped from a short
+  denylist, so `&`, `=` and `+` passed unchanged — `{{ urlquery "x&admin=1" }}` gave
+  `x&admin=1`, splicing a parameter into the very query string the function quotes
+  for, where Go gives `x%26admin%3D1`. It now matches `net/url`'s `QueryEscape` byte
+  for byte (the unreserved characters pass, a space becomes `+`, everything else is
+  uppercase `%XX`), and it takes what Go's takes: any values, joined the way `print`
+  joins them, instead of exactly one string. Thirteen cases in
+  `tests/go_conformance.txt` hold it against a real Go run, and the now-unused
+  `percent-encoding` dependency is gone.
+
+### Added
+
+- **The `html` and `js` builtins**, the last two Go builtins this engine lacked. Each
+  matches Go's escaper byte for byte — held by an exhaustive differential over every
+  Unicode rune against Go 1.26.8 and by conformance cases — with one documented edge:
+  printability (which decides what `js` passes through raw, and what `%q` escapes)
+  follows the Unicode tables this engine is built with, where Go follows its own.
+  Go 1.26 ships Unicode 15.0.0; the runes assigned since then pass through where Go
+  escapes them, and every JavaScript metacharacter is escaped by both whatever the
+  table version.
+
+- **`Limits::with_iterations`, `with_total_iterations`, `with_output_bytes`,
+  `with_function_output` and `with_deadline`** — each takes the value or `None`, so
+  one call tightens, raises or lifts a single limit:
+  `Limits::default().with_deadline(Duration::from_secs(5))`.
+
+- **`Limits`, and `Template::with_limits`.** What one render may consume, as four
+  separate counters:
+
+  | Field | Default | Bounds |
+  |---|---|---|
+  | `iterations` | 10 000 | one `{{range N}}`, and one `until` / `untilStep` / `seq` |
+  | `total_iterations` | 1 000 000 | every loop in the render together |
+  | `output_bytes` | 64 MiB | what the render writes |
+  | `function_output` | 1 000 000 | characters from one `repeat`, `indent` or `rand*` |
+  | `deadline` | *none* | how long one render may take (opt-in) |
+
+  `Limits::unlimited()` switches them off, for a program that renders only templates it
+  wrote itself. Nesting depth is not among them: there is no value above the measured
+  one that is safe, so the knob would only be a way to abort the process.
+
+- **`limits::active()`**, the limits the render on this thread is under. Template
+  functions are bare `fn` pointers with nowhere to pass a limit, so a custom function
+  that turns a number from the template into an allocation reads it from here — the
+  built-in generating functions do, and without it `{{ myFunc 9999999999 }}` is a way
+  around every limit above.
+
+- **`Limits::deadline`, how long one render may take** — the one limit that is **off by
+  default**, and deliberately. Every counter above bounds something the template asked
+  for, so the same template and data answer the same way on any machine; a deadline
+  would make a render fail on a loaded host and pass on an idle one, which is a bad
+  default and the right thing to opt into when the templates are not yours. It covers
+  what the counters cannot, and the gap is measurable:
+  `{{ range 100 }}{{ range 10000 }}{{ len (repeat 1000000 "x") }}{{ end }}{{ end }}`
+  spends the whole million-iteration budget on bodies that each build a megabyte and
+  throw it away, and ran for 13.8 seconds before `total_iterations` stopped it — every
+  count in it allowed. With a two-second deadline the same template stops at 2.00 s.
+
+  The clock starts at each `render`, so a cached template does not arrive with its
+  deadline spent. It is checked before every function call and on every 64th iteration:
+  measured over a million iterations, 27.0 ns each with a deadline against 26.9 ns
+  without, and renders stop between 2 and 290 µs past their deadline. Reading the clock
+  on every iteration instead cost 40.4 ns, a 53% tax on a render that asked for a time
+  bound and not for a slower loop. It cannot interrupt a single call — a template
+  function has no cancellation point in it — so one `genCA` runs to its end and the
+  deadline stops the next one.
+
+- **`limits::remaining()`**, the time left in the current render, for a custom function
+  with work it can do in pieces.
+
+- **`ExecError::RangeTooLong`, `TooManyIterations`, `OutputTooLarge` and
+  `DeadlineExceeded`.**
+
+### Fixed
+
+- **`eq` with more than two arguments now means what Go means**: `arg1` equal to *any*
+  of the rest. `{{ eq 1 2 1 }}` was `false` — it required all arguments equal — and is
+  `true` in Go and now here.
+
+- **`and` and `or` evaluate lazily**, as Go's have since 1.18: the arguments after the
+  one that decides are never evaluated, so `{{ and false (len nil) }}` is `false`
+  rather than an error. Recognised by function address, so a caller's own function
+  registered under either name keeps ordinary call semantics.
+
+- **`index` indexes a string by byte**, the way Go does: `{{ index "abc" 1 }}` is
+  `98`, out-of-range is refused with Go's own wording. It also takes a single
+  argument and answers it unchanged, as Go's does.
+
+- **A nil literal prints as `<no value>`** where Go prints it so: as an action's
+  output (`{{ and nil 1 }}`) and joined into the escapers (`{{ html nil }}` is
+  `&lt;no value&gt;`, with no joining space, byte for byte Go's answer). The `print`
+  family keeps `fmt.Sprint`'s `<nil>`, also byte for byte Go's.
+
+- **`ne`, `lt`, `le`, `gt` and `ge` say "exactly 2"** when refusing a third argument;
+  the message claimed "at least 2" while the check was exactly-two. And the parser's
+  "to many decalarations" typo is gone.
+
+- **`len` counts a map** without the Helm registry loaded, as Go's does.
+
+### Removed
+
+- **The Helm registry's own `len`**, for the same reason as `index` below: Helm has
+  no `len` of its own, and the shadow accepted extra arguments Go refuses. The
+  builtin, which now counts maps too, serves everywhere;
+  `helm_functions::lists::len_fn` is gone.
+
+- **`helm_functions::TOO_MANY`**, which nothing read any more: the number lives in
+  `Limits::DEFAULT.function_output`, and two copies of one default is one too many.
+
+- **The Helm registry's own `index`**, which shadowed the builtin with an array-only,
+  exactly-two-argument version. Helm has no `index` of its own — in a chart it is Go's
+  builtin — so under `all-functions` the canonical `{{ index .values "key" }}` was an
+  error here while it worked in Helm. The builtin now serves everywhere, and
+  `helm_functions::lists::index_list` is gone.
+
+### Changed
+
+- **The whole public surface can now grow without a major release.** `Template`,
+  `ErrorContext`, `StructuredError`, `NodeError`, `TemplateError` and `FuncError` are
+  `#[non_exhaustive]` like `ParseError` and `ExecError` already were;
+  `HELM_FUNCTIONS` and `MOWS_FUNCTIONS` are `&[..]` statics rather than arrays whose
+  length sat in the type; `Template`'s `text` and `tree_set` fields are internal
+  (`tree_set` exposed a type from a private module that nothing outside could name).
+  The limit errors are struct variants (`OutputTooLarge { limit }`, ...), so a field
+  can arrive later, and the new `ValueTooLarge` / `ValueTooDeep` join them. The
+  stringly limit messages in functions are typed now too:
+  `FuncError::TooMuchOutput`, `IndexOutOfRange` and `InvalidValidity`, with the
+  message texts unchanged.
+
+- **`Limits` is `#[non_exhaustive]`.** A limit for a resource not yet counted must be
+  able to arrive in a minor release, and a new field would otherwise break every
+  exhaustive construction downstream. Struct literals give way to
+  `Limits::default()` / `Limits::unlimited()` plus the `with_*` methods above; the
+  fields stay public, so reading and direct assignment are unchanged.
+
+- **The limits apply by default**, which is a behaviour change for a template that asks
+  for more than one: `{{ range 20000 }}` is refused where Go would answer. It is the
+  one divergence from Go a caller can switch off. All 149 deterministic deployment
+  templates render byte-identical to 0.10.1.
+
+- **`until`, `untilStep` and `seq` now answer to `iterations` rather than to the
+  character limit**, and so default to 10 000 rather than a million. They are ranges
+  spelled as functions — `{{ until 10000 }}` and `{{ range 10000 }}` cost the same —
+  so they belong on the same counter as `{{range}}`.
+
+- **`mowsRandomString` honours `function_output`.** Its `u16` length already made
+  exhaustion impossible, but a caller who lowered the limit meant it for every
+  generating function.
+
+- **`ExecError::MaxTemplateDepth` carries the depth it hit**, and its message names it.
+
 ## [0.10.1] - 2026-10-12
 
 ### Security

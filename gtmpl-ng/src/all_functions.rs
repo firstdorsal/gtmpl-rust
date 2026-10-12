@@ -9,13 +9,13 @@ use crate::Func;
 
 /// Get all template functions (Helm + mows) as a Vec
 ///
-/// This function returns all 155 template functions:
-/// - 152 Helm-compatible functions
+/// This function returns all 153 template functions:
+/// - 150 Helm-compatible functions
 /// - 3 mows-specific functions
 pub fn all_functions() -> Vec<(&'static str, Func)> {
     let mut funcs = Vec::with_capacity(HELM_FUNCTIONS.len() + MOWS_FUNCTIONS.len());
-    funcs.extend_from_slice(&HELM_FUNCTIONS);
-    funcs.extend_from_slice(&MOWS_FUNCTIONS);
+    funcs.extend_from_slice(HELM_FUNCTIONS);
+    funcs.extend_from_slice(MOWS_FUNCTIONS);
     funcs
 }
 
@@ -26,6 +26,6 @@ mod tests {
     #[test]
     fn test_all_functions_count() {
         let funcs = all_functions();
-        assert_eq!(funcs.len(), 155); // 152 helm + 3 mows
+        assert_eq!(funcs.len(), 153); // 150 helm + 3 mows
     }
 }

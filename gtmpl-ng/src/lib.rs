@@ -13,6 +13,7 @@ mod exec;
 pub mod funcs;
 mod go_number;
 mod lexer;
+pub mod limits;
 mod node;
 mod parse;
 mod print_verb;
@@ -34,6 +35,9 @@ pub use crate::template::Template;
 
 #[doc(inline)]
 pub use crate::exec::Context;
+
+#[doc(inline)]
+pub use crate::limits::Limits;
 
 pub use error::{ErrorContext, ExecError, ParseError, StructuredError, TemplateError};
 

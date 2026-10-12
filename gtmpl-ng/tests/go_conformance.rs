@@ -14,15 +14,25 @@ fn formatting_matches_the_recorded_go_behaviour() {
     // Pinned rather than bounded: a case commented out with the file's own `#` would
     // otherwise vanish from the run without a trace, which is the one way this fixture
     // can quietly stop covering what it says it covers.
-    const RECORDED_CASES: usize = 294;
-    const RECORDED_ERROR_CASES: usize = 36;
+    const RECORDED_CASES: usize = 442;
+    const RECORDED_ERROR_CASES: usize = 60;
 
     let mut checked = 0;
     let mut error_cases = 0;
     let mut failures: Vec<String> = Vec::new();
 
     for line in FIXTURE.lines() {
-        if line.starts_with('#') || line.trim().is_empty() {
+        if let Some(commented) = line.strip_prefix('#') {
+            // A case is never disabled by commenting it out: it either holds or it is
+            // deleted deliberately, with the header's arithmetic updated.
+            assert!(
+                !(commented.matches('\t').count() == 2
+                    && (commented.contains("\tOK\t") || commented.contains("\tERR\t"))),
+                "commented-out fixture case: {line:?}"
+            );
+            continue;
+        }
+        if line.trim().is_empty() {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();

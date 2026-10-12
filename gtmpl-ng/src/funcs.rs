@@ -1,23 +1,11 @@
 //! Builtin functions.
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use gtmpl_value_ng::{Func, FuncError, Value};
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 
 use crate::printf::sprintf;
 use crate::utils::is_true;
-
-const QUERY_ENCODE: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'<')
-    .add(b'>')
-    .add(b'#')
-    .add(b'`')
-    .add(b'`')
-    .add(b'?')
-    .add(b'{')
-    .add(b'}');
 
 pub static BUILTINS: &[(&str, Func)] = &[
     ("eq", eq as Func),
@@ -31,6 +19,8 @@ pub static BUILTINS: &[(&str, Func)] = &[
     ("or", or as Func),
     ("not", not as Func),
     ("urlquery", urlquery as Func),
+    ("html", html as Func),
+    ("js", js as Func),
     ("print", print as Func),
     ("println", println as Func),
     ("printf", printf as Func),
@@ -123,7 +113,8 @@ macro_rules! gn {
   $(#[$outer])*
   pub fn $name(args: &[Value]) -> Result<Value, FuncError> {
    if args.len() != 2 {
-    return Err(FuncError::AtLeastXArgs(stringify!($name).into(), 2));
+    // Go's wording is "want 2": only `eq` is variadic among the comparisons.
+    return Err(FuncError::ExactlyXArgs(stringify!($name).into(), 2));
    }
    let $arg1 = &args[0];
    let $arg2 = &args[1];
@@ -137,8 +128,11 @@ macro_rules! gn {
 
 /// Returns the boolean OR of its arguments by returning the
 /// first non-empty argument or the last argument, that is,
-/// "or x y" behaves as "if x then x else y". All the
-/// arguments are evaluated.
+/// "or x y" behaves as "if x then x else y".
+///
+/// In a template, `or` evaluates lazily, as Go's has since 1.18: the arguments after
+/// the first truthy one are never evaluated. Calling this function directly is eager
+/// by construction, because its arguments are values that already exist.
 ///
 /// # Example
 /// ```
@@ -159,8 +153,11 @@ pub fn or(args: &[Value]) -> Result<Value, FuncError> {
 
 /// Returns the boolean AND of its arguments by returning the
 /// first empty argument or the last argument, that is,
-/// "and x y" behaves as "if x then y else x". All the
-/// arguments are evaluated.
+/// "and x y" behaves as "if x then y else x".
+///
+/// In a template, `and` evaluates lazily, as Go's has since 1.18: the arguments after
+/// the first falsy one are never evaluated. Calling this function directly is eager
+/// by construction, because its arguments are values that already exist.
 ///
 /// # Example
 /// ```
@@ -211,7 +208,7 @@ pub fn len(args: &[Value]) -> Result<Value, FuncError> {
     let len = match *arg {
         Value::String(ref s) => s.len(),
         Value::Array(ref a) => a.len(),
-        Value::Object(ref o) => o.len(),
+        Value::Map(ref o) | Value::Object(ref o) => o.len(),
         _ => {
             return Err(FuncError::Generic(format!("unable to call len on {}", arg)));
         }
@@ -269,12 +266,42 @@ fn printed(val: &Value) -> String {
 /// assert_eq!(&equal.unwrap(), "Hello world!");
 /// ```
 pub fn print(args: &[Value]) -> Result<Value, FuncError> {
+    Ok(val!(sprint(args)))
+}
+
+/// The joining `print` shares with the escapers: operands in their default format,
+/// with a space between two of them when neither reads as a string.
+fn sprint(args: &[Value]) -> String {
+    sprint_shown(args, |value| match value {
+        Value::String(text) => Some(Cow::Borrowed(text.as_str())),
+        _ => None,
+    })
+}
+
+/// Go's `evalArgs` view of the same joining, which [`urlquery`], [`html`] and [`js`]
+/// go through: identical to [`sprint`] except that an untyped nil reads as the
+/// *string* `<no value>` -- so it shows the way a missing value does, and takes no
+/// joining space, where `fmt.Sprint` would write `<nil>` with one. Measured against
+/// Go 1.26.8: `{{ html 1 nil }}` is `1&lt;no value&gt;`, no space.
+fn sprint_printable(args: &[Value]) -> String {
+    sprint_shown(args, |value| match value {
+        Value::String(text) => Some(Cow::Borrowed(text.as_str())),
+        Value::Nil => Some(Cow::Borrowed("<no value>")),
+        _ => None,
+    })
+}
+
+/// `fmt.Sprint`'s joining, with `as_string` deciding which operands count as strings.
+fn sprint_shown<'v>(
+    args: &'v [Value],
+    as_string: impl Fn(&'v Value) -> Option<Cow<'v, str>>,
+) -> String {
     let mut no_space = true;
     let mut s = String::new();
     for val in args {
-        if let Value::String(ref v) = *val {
+        if let Some(text) = as_string(val) {
             no_space = true;
-            s.push_str(v);
+            s.push_str(&text);
         } else {
             if no_space {
                 s += &printed(val);
@@ -284,7 +311,7 @@ pub fn print(args: &[Value]) -> Result<Value, FuncError> {
             no_space = false;
         }
     }
-    Ok(val!(s))
+    s
 }
 
 /// An implementation of golang's fmt.Sprintln
@@ -452,11 +479,35 @@ pub fn slice(args: &[Value]) -> Result<Value, FuncError> {
 }
 
 pub fn index(args: &[Value]) -> Result<Value, FuncError> {
-    if args.len() < 2 {
-        return Err(FuncError::AtLeastXArgs("index".into(), 2));
+    // Go wants at least one argument, and with exactly one -- no keys -- it answers
+    // the argument itself.
+    if args.is_empty() {
+        return Err(FuncError::AtLeastXArgs("index".into(), 1));
     }
     let mut col = &args[0];
-    for val in &args[1..] {
+    for (position, val) in args[1..].iter().enumerate() {
+        // Go indexes a string by byte and answers the byte as a number --
+        // `{{ index "abc" 1 }}` is `98` -- which makes a value rather than borrowing
+        // one, so it cannot go through `get_item`.
+        if let (Value::String(text), Value::Number(n)) = (col, val) {
+            // Go also refuses to index into the byte, so a follow-on key is answered
+            // before the byte is even looked up.
+            if let Some(next) = args.get(position + 2) {
+                return Err(FuncError::Generic(format!(
+                    "unable to index a byte of a string with {next}"
+                )));
+            }
+            let byte = n
+                .as_u64()
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| text.as_bytes().get(i).copied());
+            let Some(byte) = byte else {
+                return Err(FuncError::IndexOutOfRange {
+                    index: val.to_string(),
+                });
+            };
+            return Ok(Value::from(u64::from(byte)));
+        }
         col = get_item(col, val)?;
     }
 
@@ -484,26 +535,124 @@ fn get_item<'a>(col: &'a Value, key: &Value) -> Result<&'a Value, FuncError> {
     }
 }
 
-/// Returns the escaped value of the textual representation of
-/// its arguments in a form suitable for embedding in a URL query.
+/// Go's `urlquery`: the arguments joined the way [`print()`] joins them, escaped for
+/// embedding in a URL query.
+///
+/// The escape is `net/url`'s `QueryEscape`, byte for byte: the unreserved characters
+/// `A-Z a-z 0-9 - _ . ~` pass, a space becomes `+`, and every other byte becomes
+/// uppercase `%XX`. Before 1.0 this was a percent-encoding *denylist* that let `&`,
+/// `=` and `+` through -- the characters that structure a query string -- so the one
+/// splice the function exists to prevent, `{{ urlquery .value }}` injecting
+/// parameters into a URL, was exactly what it allowed.
+///
+/// Spelled out rather than taken from a crate: `percent-encoding` can express the
+/// allowlist (its `AsciiSet` has `remove`), but writes a space as `%20` where Go
+/// writes `+`, so a second pass would be needed anyway -- and `form_urlencoded`
+/// keeps `*` and escapes `~`, the reverse of Go on both. One byte loop is simpler
+/// than either plus a fix-up.
 ///
 /// # Example
 /// ```
 /// use gtmpl_ng::template;
 /// let url = template(r#"{{ urlquery "foo bar?" }}"#, 0);
-/// assert_eq!(&url.unwrap(), "foo%20bar%3F");
+/// assert_eq!(&url.unwrap(), "foo+bar%3F");
 /// ```
 pub fn urlquery(args: &[Value]) -> Result<Value, FuncError> {
-    if args.len() != 1 {
-        return Err(FuncError::ExactlyXArgs("urlquery".into(), 1));
+    use std::fmt::Write as _;
+    let joined = sprint_printable(args);
+    let mut escaped = String::with_capacity(joined.len());
+    for &byte in joined.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                escaped.push(char::from(byte));
+            }
+            b' ' => escaped.push('+'),
+            // Writing into a `String` cannot fail.
+            _ => {
+                let _ = write!(escaped, "%{byte:02X}");
+            }
+        }
     }
-    let val = &args[0];
-    match *val {
-        Value::String(ref s) => Ok(val!(utf8_percent_encode(s, QUERY_ENCODE).to_string())),
-        _ => Err(FuncError::Generic(
-            "Arguments need to be of type String".into(),
-        )),
+    Ok(val!(escaped))
+}
+
+/// Go's `html`: the arguments joined the way [`print()`] joins them, escaped for
+/// embedding in HTML text.
+///
+/// Safe for HTML text content and quoted attribute values, exactly like Go's: an
+/// *unquoted* attribute is not a context it can make safe, because a space or `=`
+/// passes through.
+///
+/// Go's `template.HTMLEscapeString`, rune for rune: `<`, `>`, `&`, `"` and `'` become
+/// entities -- the numeric `&#34;` and `&#39;`, which is what Go writes, rather than
+/// `&quot;` and `&apos;` -- a NUL becomes U+FFFD, and everything else passes through,
+/// control characters included.
+///
+/// # Example
+/// ```
+/// use gtmpl_ng::template;
+/// let text = template(r#"{{ html "<b>1 & 2</b>" }}"#, 0);
+/// assert_eq!(&text.unwrap(), "&lt;b&gt;1 &amp; 2&lt;/b&gt;");
+/// ```
+pub fn html(args: &[Value]) -> Result<Value, FuncError> {
+    let joined = sprint_printable(args);
+    let mut escaped = String::with_capacity(joined.len());
+    for c in joined.chars() {
+        match c {
+            '\0' => escaped.push('\u{FFFD}'),
+            '"' => escaped.push_str("&#34;"),
+            '\'' => escaped.push_str("&#39;"),
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            c => escaped.push(c),
+        }
     }
+    Ok(val!(escaped))
+}
+
+/// Go's `js`: the arguments joined the way [`print()`] joins them, escaped for
+/// embedding in a JavaScript string literal.
+///
+/// Safe for single- or double-quoted JS strings, exactly like Go's: a template
+/// literal is not a context it can make safe, because a backtick and `${` pass
+/// through.
+///
+/// Go's `template.JSEscapeString`: `\`, `'` and `"` get a backslash; `<`, `>`, `&`
+/// and `=` become `\u00XX` so the output cannot close a surrounding `<script>` or
+/// start a comment; a control character becomes `\u00XX`; and a rune that Go's
+/// `strconv.IsPrint` rejects is written `\uXXXX`, with more than four digits for an
+/// astral rune, exactly as Go writes it --
+/// `strconv.IsPrint` and the `unicode.IsPrint` Go consults here answer the same for
+/// every rune, verified exhaustively against Go 1.26.8.
+///
+/// # Example
+/// ```
+/// use gtmpl_ng::template;
+/// let text = template(r#"{{ js "a='x'&\"y\"" }}"#, 0);
+/// assert_eq!(&text.unwrap(), r#"a\u003D\'x\'\u0026\"y\""#);
+/// ```
+pub fn js(args: &[Value]) -> Result<Value, FuncError> {
+    use std::fmt::Write as _;
+    // Go writes `\u%04X`: at least four uppercase digits, more when the rune needs
+    // them. Writing into a `String` cannot fail.
+    let push_u_escape = |escaped: &mut String, scalar: u32| {
+        let _ = write!(escaped, "\\u{scalar:04X}");
+    };
+    let joined = sprint_printable(args);
+    let mut escaped = String::with_capacity(joined.len());
+    for c in joined.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("\\'"),
+            '"' => escaped.push_str("\\\""),
+            '<' | '>' | '&' | '=' => push_u_escape(&mut escaped, c as u32),
+            c if (c as u32) < 0x20 => push_u_escape(&mut escaped, c as u32),
+            c if c.is_ascii() || crate::print_verb::is_printable(c) => escaped.push(c),
+            c => push_u_escape(&mut escaped, c as u32),
+        }
+    }
+    Ok(val!(escaped))
 }
 
 /// Returns the boolean truth of arg1 == arg2 [== arg3 ...]
@@ -519,7 +668,9 @@ pub fn eq(args: &[Value]) -> Result<Value, FuncError> {
         return Err(FuncError::AtLeastXArgs("eq".into(), 2));
     }
     let first = &args[0];
-    Ok(Value::from(args.iter().skip(1).all(|x| *x == *first)))
+    // Go's `eq`: true when the first argument equals *any* of the rest --
+    // `{{ eq 1 2 1 }}` is true -- not when all of them are equal.
+    Ok(Value::from(args.iter().skip(1).any(|x| *x == *first)))
 }
 
 gn!(
@@ -894,5 +1045,107 @@ mod tests_mocked {
         let vals: Vec<Value> = vec![val!("foobar"), val!("foo")];
         let ret = has_prefix(&vals);
         assert_eq!(ret.unwrap(), Value::from(true));
+    }
+
+    /// Every pair was run through Go 1.26.8's `text/template`; the same cases render
+    /// end to end in `tests/go_conformance.txt`. The second case is the reason the
+    /// function exists: `&`, `=` and `+` used to pass through unescaped, which let a
+    /// value splice parameters into the query string it was quoted for.
+    #[test]
+    fn urlquery_matches_gos_query_escape() {
+        for (input, expected) in [
+            ("a b", "a+b"),
+            ("a+b/c?d=e&f", "a%2Bb%2Fc%3Fd%3De%26f"),
+            ("\u{e4}\u{f6}\u{fc}", "%C3%A4%C3%B6%C3%BC"),
+            ("~-_.!*'()", "~-_.%21%2A%27%28%29"),
+            ("#[]|\\^%", "%23%5B%5D%7C%5C%5E%25"),
+            ("", ""),
+        ] {
+            let escaped = urlquery(&[val!(input)]).unwrap();
+            assert_eq!(escaped, val!(expected), "{input:?}");
+        }
+    }
+
+    /// The rows Go 1.26.8 printed for `template.HTMLEscapeString` over every ASCII
+    /// byte, plus the NUL replacement, which is the one rewrite that is not an entity.
+    #[test]
+    fn html_matches_gos_escaper() {
+        for (input, expected) in [
+            ("<b>1 & 2</b>", "&lt;b&gt;1 &amp; 2&lt;/b&gt;"),
+            ("a'b\"c", "a&#39;b&#34;c"),
+            ("a\u{0}b", "a\u{FFFD}b"),
+            ("\n\t\u{1b}", "\n\t\u{1b}"),
+            (
+                "\u{e4}\u{f6}\u{fc} \u{1F600}",
+                "\u{e4}\u{f6}\u{fc} \u{1F600}",
+            ),
+        ] {
+            assert_eq!(html(&[val!(input)]).unwrap(), val!(expected), "{input:?}");
+        }
+    }
+
+    /// The rows Go 1.26.8 printed for `template.JSEscapeString`: the backslash
+    /// escapes, the `\u00XX` metacharacters, the control characters, and the
+    /// printability boundary -- U+2028 and U+2029 escaped (they end a JS line),
+    /// the no-break space and C1 controls escaped, an astral non-printable rune
+    /// written with five digits the way Go writes it.
+    #[test]
+    fn js_matches_gos_escaper() {
+        for (input, expected) in [
+            ("a='x'&\"y\"", "a\\u003D\\'x\\'\\u0026\\\"y\\\""),
+            ("back\\slash", "back\\\\slash"),
+            ("<script>", "\\u003Cscript\\u003E"),
+            ("\u{0}\u{1f}", "\\u0000\\u001F"),
+            ("\u{2028}\u{2029}", "\\u2028\\u2029"),
+            ("\u{a0}\u{80}\u{85}", "\\u00A0\\u0080\\u0085"),
+            ("\u{E0001}", "\\uE0001"),
+            ("\u{e4} \u{4e2d} \u{1F600}", "\u{e4} \u{4e2d} \u{1F600}"),
+        ] {
+            assert_eq!(js(&[val!(input)]).unwrap(), val!(expected), "{input:?}");
+        }
+    }
+
+    /// `html` and `js` join the same way, and an untyped nil shows as `<no value>`
+    /// the way Go's `evalArgs` shows it -- where `print` itself writes `<nil>`.
+    #[test]
+    fn html_and_js_take_what_print_takes() {
+        assert_eq!(html(&[]).unwrap(), val!(""));
+        assert_eq!(js(&[]).unwrap(), val!(""));
+        assert_eq!(
+            html(&[Value::from(1), val!("<")]).unwrap(),
+            val!("1&lt;"),
+            "a number is stringified, two non-strings would get a space"
+        );
+        assert_eq!(js(&[val!("a"), val!("<")]).unwrap(), val!("a\\u003C"));
+        assert_eq!(html(&[Value::Nil]).unwrap(), val!("&lt;no value&gt;"));
+        assert_eq!(
+            js(&[Value::Nil]).unwrap(),
+            val!("\\u003Cno value\\u003E"),
+            "the brackets of <no value> are metacharacters like any other"
+        );
+        assert_eq!(
+            urlquery(&[Value::Nil, Value::Nil]).unwrap(),
+            val!("%3Cno+value%3E%3Cno+value%3E"),
+            "two nils join with a space, and the space escapes to +"
+        );
+        assert_eq!(
+            print(&[Value::Nil]).unwrap(),
+            val!("<nil>"),
+            "print keeps fmt.Sprint's spelling"
+        );
+    }
+
+    /// Go's `URLQueryEscaper` is variadic over any values, joined like `print` -- so
+    /// a number is stringified rather than refused, and the space `print` puts
+    /// between two non-strings is escaped like any other.
+    #[test]
+    fn urlquery_takes_what_print_takes() {
+        assert_eq!(urlquery(&[Value::from(42)]).unwrap(), val!("42"));
+        assert_eq!(urlquery(&[val!("a"), val!("b")]).unwrap(), val!("ab"));
+        assert_eq!(
+            urlquery(&[Value::from(1), Value::from(2)]).unwrap(),
+            val!("1+2")
+        );
+        assert_eq!(urlquery(&[]).unwrap(), val!(""));
     }
 }

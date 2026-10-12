@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 fn render(tmpl_str: &str, ctx: Value) -> Result<String, String> {
     let mut tmpl = Template::default();
-    tmpl.add_funcs(&HELM_FUNCTIONS);
+    tmpl.add_funcs(HELM_FUNCTIONS);
     tmpl.parse(tmpl_str).map_err(|e| format!("parse: {e}"))?;
     tmpl.render(&Context::from(ctx))
         .map_err(|e| format!("exec: {e}"))
@@ -89,5 +89,63 @@ fn url_literal_with_percent_encoded_brackets_as_default() {
     assert_eq!(
         render(tmpl, Value::from(ctx)).unwrap(),
         "https://actual.example/file"
+    );
+}
+
+/// Previously panicked in `helm_functions::certs::validity_period`, which did
+/// `OffsetDateTime::now_utc().checked_add(..).unwrap()`. A template names a
+/// certificate's lifetime in days and can name any number; a few hundred million push
+/// the date past the years `OffsetDateTime` holds, and a few quintillion overflow the
+/// multiplication inside `Duration::days`, which panics by documented contract. Both
+/// were a crash out of a template literal, so neither could be caught.
+#[test]
+fn a_certificate_lifetime_past_the_date_range_does_not_panic() {
+    let cases = [
+        r#"{{ genCA "ca" 999999999 }}"#,
+        r#"{{ genCA "ca" 9223372036854775807 }}"#,
+        r#"{{ genCA "ca" -9223372036854775808 }}"#,
+        // Negative days land before year 0 long before any arithmetic overflows: the
+        // ASN.1 writer asserts the year is 0..=9999, so -800000 days (year -164) hit
+        // that assert and aborted. `genCA` parses its days as an i64 and reaches the
+        // year bound; the other two refuse a negative at their u32 argument parse,
+        // which the case below this list covers.
+        r#"{{ genCA "ca" -800000 }}"#,
+        r#"{{ genSelfSignedCert "host" nil nil 999999999 }}"#,
+        r#"{{ $ca := genCA "ca" 365 }}{{ genSignedCert "host" nil nil 999999999 $ca }}"#,
+    ];
+    for source in cases {
+        let error = render(source, Value::Nil).expect_err(source);
+        assert!(
+            error.contains("days is further off than a certificate date can reach"),
+            "{source} failed for another reason: {error}"
+        );
+    }
+}
+
+/// The two functions that read their days as an unsigned number refuse a negative one
+/// at the parse, before any date arithmetic -- also an error rather than the abort,
+/// just a different one.
+#[test]
+fn a_negative_certificate_lifetime_is_refused_not_aborted() {
+    for source in [
+        r#"{{ genSelfSignedCert "host" nil nil -800000 }}"#,
+        r#"{{ $ca := genCA "ca" 365 }}{{ genSignedCert "host" nil nil -800000 $ca }}"#,
+    ] {
+        let error = render(source, Value::Nil).expect_err(source);
+        assert!(
+            error.contains("Invalid number"),
+            "{source} failed for another reason: {error}"
+        );
+    }
+}
+
+/// And the ordinary lifetime a chart asks for still works, so the bound did not simply
+/// turn the functions off.
+#[test]
+fn an_ordinary_certificate_lifetime_still_works() {
+    let rendered = render(r#"{{ (genCA "ca" 365).Cert }}"#, Value::Nil).expect("a year is fine");
+    assert!(
+        rendered.starts_with("-----BEGIN CERTIFICATE-----"),
+        "{rendered}"
     );
 }

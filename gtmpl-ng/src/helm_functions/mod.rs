@@ -22,29 +22,52 @@ pub mod utils;
 
 use gtmpl_value_ng::FuncError;
 
-/// The largest number of elements or characters a template may ask a function to
-/// create.
-///
-/// Go recovers a panic inside a template function and reports it as a template error.
-/// This engine returns `Result` instead, so a function that panics or exhausts memory
-/// escapes the type the API promises -- `{{ until 9999999999 }}` and
-/// `{{ repeat 9999999999 "x" }}` both took the process down with a core dump, from a
-/// template literal alone and with no data involved.
-///
-/// The number is Go's own: `fmt` refuses a width or precision past a million for the
-/// same reason, and `printf.rs` already holds that line.
-pub const TOO_MANY: usize = 1_000_000;
-
-/// Reads a count a template asked for, refusing one large enough to exhaust memory.
+/// Reads a count of characters a template asked a function to produce, refusing one
+/// past [`Limits::function_output`](crate::Limits::function_output).
 ///
 /// `what` names the thing being counted, so the message says which argument to look
 /// at: "repeat: 9999999999 characters is more than the 1000000 this allows".
 pub fn bounded_count(count: i64, what: &str, function: &str) -> Result<usize, FuncError> {
+    bounded_by(
+        count,
+        what,
+        function,
+        crate::limits::active().function_output,
+    )
+}
+
+/// Reads a count of list elements a template asked a function to produce, refusing one
+/// past [`Limits::iterations`](crate::Limits::iterations).
+///
+/// `until`, `untilStep` and `seq` are ranges that happen to be spelled as functions --
+/// `{{ until 9999999999 }}` and `{{ range 9999999999 }}` cost the same -- so they
+/// answer to the same limit as `{{range}}` rather than to the one on produced text.
+pub fn bounded_elements(count: i64, function: &str) -> Result<usize, FuncError> {
+    bounded_by(
+        count,
+        "elements",
+        function,
+        crate::limits::active().iterations,
+    )
+}
+
+fn bounded_by(
+    count: i64,
+    what: &str,
+    function: &str,
+    limit: Option<usize>,
+) -> Result<usize, FuncError> {
+    // A negative count is not an allocation; the callers read it as "none".
     let count = usize::try_from(count).unwrap_or(0);
-    if count > TOO_MANY {
-        return Err(FuncError::Generic(format!(
-            "{function}: {count} {what} is more than the {TOO_MANY} this allows"
-        )));
+    if let Some(limit) = limit {
+        if count > limit {
+            return Err(FuncError::TooMuchOutput {
+                function: function.to_owned(),
+                count,
+                what: what.to_owned(),
+                limit,
+            });
+        }
     }
     Ok(count)
 }
@@ -65,7 +88,7 @@ pub use logic::value_is_truthy;
 ///
 /// This array contains all the Helm template functions.
 /// Functions are organized by category in separate modules.
-pub const HELM_FUNCTIONS: [(&str, Func); 152] = [
+pub static HELM_FUNCTIONS: &[(&str, Func)] = &[
     // Logic functions
     ("default", logic::default as Func),
     ("empty", logic::empty as Func),
@@ -187,13 +210,11 @@ pub const HELM_FUNCTIONS: [(&str, Func); 152] = [
     ("mustHas", lists::must_has as Func),
     ("compact", lists::compact as Func),
     ("mustCompact", lists::must_compact as Func),
-    ("index", lists::index_list as Func),
     ("slice", lists::slice as Func),
     ("mustSlice", lists::must_slice as Func),
     ("until", lists::until as Func),
     ("untilStep", lists::until_step as Func),
     ("seq", lists::seq as Func),
-    ("len", lists::len_fn as Func),
     // Dictionary/Map functions
     ("get", dicts::get as Func),
     ("set", dicts::set as Func),

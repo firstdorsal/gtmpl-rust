@@ -9,9 +9,9 @@
 #     awk -F'\t' '!/^#/ && NF>0 {print $1}' go_conformance.txt |
 #         go run go_conformance.go > /tmp/go-side.txt
 #
-# Of 294 cases, 249 are byte-identical to Go. The 45 that are not break down as:
+# Of 442 cases, 361 are byte-identical to Go. The 81 that are not break down as:
 #
-#   31 the same failure reported in different words. Go writes
+#   54 the same failure reported in different words. Go writes
 #       `template: t:1: illegal number syntax: "0x1.8"`; this engine adds the line,
 #       column and length, which is the point of its error context. Same class, same
 #       cause, so these are not behavioural differences.
@@ -20,17 +20,22 @@
 #       the debug quoting differs -- Rust writes a control character as `\u{5}` where
 #       Go writes `\x05`. Verified with a byte comparison.
 #
-#   13  real differences, all of them deliberate:
+#   26  real differences, all of them deliberate:
 #
-#       `{{ printf "%s" 18446744073709551615 }}`
-#           Go's parser refuses the literal -- "overflows int" -- and never reaches
-#           the verb. This engine reads it as a u64 and prints it.
+#       `{{ printf "%s" 18446744073709551615 }}`, `{{ eq 18446744073709551615 -1 }}`
+#           Go's parser refuses the literal -- "overflows int" -- wherever it stands.
+#           This engine reads it as a u64 and uses it in any position, so a
+#           comparison against it answers where Go never parses.
 #
 #       `{{ printf "%d" .Missing }}`, `{{ printf "%s" .Missing }}`,
 #       `{{ print .nope }}`, `{{ println .nope }}`
 #           Rendered with no data at all, Go treats a field of an invalid value as
 #           absent and prints `<nil>`; this engine reports that nil has no fields.
-#           See the README's limitations.
+#           (Separate from this: a nil *literal* that reaches an action's output or
+#           an escaper prints `<no value>` in both engines, while the `print` family
+#           spells it `<nil>` in both -- that pair is pinned below and is not a
+#           difference.)
+#           See the engine README's "Where this engine deliberately differs from Go".
 #
 #       `{{ printf "%q" (slice "héllo" 1 2) }}`
 #           Go indexes a string by byte and is content to produce invalid UTF-8: the
@@ -38,7 +43,29 @@
 #           cannot hold that, so the index is refused rather than answered with
 #           something else. Every index that lands on a character boundary agrees.
 #
-#       `{{ printf "%f" 1 }}`, `{{ printf "%e" 1 }}`, `{{ printf "%.*f" "x" 5 }}`,
+#       `{{ eq 3.0 3 }}`, `{{ lt 1.5 2 }}`, `{{ lt 5 3.5 }}`, `{{ eq "a" 1 }}`,
+#       `{{ eq 1 "a" 1 }}`, `{{ lt true false }}`
+#           Comparison is deliberately permissive, Sprig-style: values of different
+#           kinds compare instead of failing, so `eq` across types answers false and
+#           `lt` orders booleans, where Go refuses with "incompatible types for
+#           comparison" or "invalid type for comparison". The first two also lean on
+#           the whole-float decision below. See the engine README's "Where this engine deliberately differs from Go".
+#
+#       `{{ printf "%x" 1.5 }}`, `{{ printf "%b" 1.5 }}`, `{{ printf "%#g" 1.5 }}`,
+#       `{{ printf "%#v" "x" }}`
+#           The printf gaps: the two float verbs Go formats as hexadecimal float and
+#           power-of-two mantissa are reported as bad verbs here, `%#g` does not
+#           restore Go's trailing zeros, and `%#v` renders as plain `%v` rather than
+#           Go's syntax representation. See the engine README's deliberate
+#           differences.
+#
+#       `{{ 2i }}`
+#           Complex numbers do not exist here: Go the language has the type, a
+#           configuration template has no use for it, and `Value` has no variant to
+#           hold one -- so the literal is refused at parse where Go prints `(0+2i)`.
+#
+#       `{{ printf "%f" 1 }}`, `{{ printf "%f" 3 }}`, `{{ printf "%e" 1 }}`,
+#       `{{ printf "%.*f" "x" 5 }}`,
 #       `{{ 1e6 }}`, `{{ 1234567.0 }}`, `{{ printf "%v" 1e19 }}`,
 #       `{{ range 3.0 }}{{ . }}{{ end }}`
 #           All seven follow from one decision: a whole float is stored as an integer
@@ -48,12 +75,29 @@
 #           Go refuses to iterate a float, this engine iterates the integer it was
 #           collapsed to. The alternative is to keep floats apart, which would change
 #           `as_u64()` on every whole float a caller builds and move output such as
-#           `1000000` to `1e+06`. See the README's limitations.
+#           `1000000` to `1e+06`. See the engine README's "Where this engine deliberately differs from Go".
 #
 # Six cases are deliberately not here: a width or precision near Go's million-digit
 # cap produces a megabyte of output each, which is not worth shipping in a fixture.
 # They live in `printf.rs`'s `a_precision_near_gos_cap_matches_go` instead, asserted
 # by length and edges against the same Go run.
+#
+# One further class of difference is deliberate and has no cases here, because every
+# case here is far inside it: this engine renders under the resource limits in
+# `src/limits.rs`, and Go has none. A template that asks for more than the default --
+# `{{ range 20000 }}`, a template that calls itself, more than 64 MiB of output -- is
+# refused where Go would answer. That is the one divergence a caller can switch off,
+# with `Limits::unlimited()`; see `tests/malicious_templates.rs` for why the defaults
+# are what they are.
+#
+# And one class has no cases because it moves under the fixture: printability. What
+# `js` passes through raw and what `%q` leaves unescaped follows `strconv.IsPrint`'s
+# definition over the Unicode version this engine's tables ship, where Go applies it
+# over its own (15.0.0 in Go 1.26.8). The runes assigned between the two versions --
+# 5 812 of 1 112 064 at the time of writing, measured by running every rune through
+# both -- render raw here and escaped there, always in that direction. A case on such
+# a rune would pin a table version rather than a behaviour, so none is included; every
+# metacharacter `js` and `%q` exist for is escaped by both engines whatever the table.
 #
 {{ -3.14 }}	OK	"-3.14"
 {{ -0.5 }}	OK	"-0.5"
@@ -231,6 +275,32 @@
 {{ println .nope }}	ERR	template: :1:12:5:only maps and objects have fields
 {{ print .nope }}	ERR	template: :1:10:5:only maps and objects have fields
 {{ println 1 nil 2 }}	OK	"1 <nil> 2\n"
+{{ urlquery "a b" }}	OK	"a+b"
+{{ urlquery "a+b/c?d=e&f" }}	OK	"a%2Bb%2Fc%3Fd%3De%26f"
+{{ urlquery "äöü" }}	OK	"%C3%A4%C3%B6%C3%BC"
+{{ urlquery "~-_.!*'()" }}	OK	"~-_.%21%2A%27%28%29"
+{{ urlquery "#[]|\\^%" }}	OK	"%23%5B%5D%7C%5C%5E%25"
+{{ urlquery 42 }}	OK	"42"
+{{ urlquery 3.5 }}	OK	"3.5"
+{{ urlquery true }}	OK	"true"
+{{ urlquery "a" "b" }}	OK	"ab"
+{{ urlquery "a" 1 }}	OK	"a1"
+{{ urlquery 1 2 }}	OK	"1+2"
+{{ urlquery "" }}	OK	""
+{{ urlquery }}	OK	""
+{{ html "<b>1 & 2</b>" }}	OK	"&lt;b&gt;1 &amp; 2&lt;/b&gt;"
+{{ html "a'b\"c" }}	OK	"a&#39;b&#34;c"
+{{ html "äöü" }}	OK	"äöü"
+{{ html 1 2 }}	OK	"1 2"
+{{ html }}	OK	""
+{{ html true }}	OK	"true"
+{{ js "a='x'&\"y\"" }}	OK	"a\\u003D\\'x\\'\\u0026\\\"y\\\""
+{{ js "<script>alert(1)</script>" }}	OK	"\\u003Cscript\\u003Ealert(1)\\u003C/script\\u003E"
+{{ js "back\\slash" }}	OK	"back\\\\slash"
+{{ js "äöü" }}	OK	"äöü"
+{{ js 1 2 }}	OK	"1 2"
+{{ js }}	OK	""
+{{ js 3.5 }}	OK	"3.5"
 {{ printf "%#08o" 8 }}	OK	"00000010"
 {{ printf "%q" "x[\u00a0]y" }}	OK	"\"x[\\u00a0]y\""
 {{ printf "%q" "x[\u2028]y" }}	OK	"\"x[\\u2028]y\""
@@ -349,3 +419,125 @@
 {{ slice true 1 }}	ERR	template: :1:4:12:can't slice item of type bool
 {{ slice nil 1 }}	ERR	template: :1:4:11:slice of untyped nil
 {{ printf "%q" (slice "héllo" 1 2) }}	ERR	template: :1:16:20:slice index 2 is inside a character of "héllo"
+{{ eq 1 1 }}	OK	"true"
+{{ eq 1 2 }}	OK	"false"
+{{ eq "a" "a" }}	OK	"true"
+{{ eq 1 1 1 }}	OK	"true"
+{{ eq 1 2 1 }}	OK	"true"
+{{ eq 1 2 3 1 }}	OK	"true"
+{{ eq true true }}	OK	"true"
+{{ eq true false }}	OK	"false"
+{{ eq nil nil }}	OK	"true"
+{{ ne 1 2 }}	OK	"true"
+{{ ne 1 1 }}	OK	"false"
+{{ ne "a" "b" }}	OK	"true"
+{{ lt 1 2 }}	OK	"true"
+{{ lt 2 1 }}	OK	"false"
+{{ lt 1 1 }}	OK	"false"
+{{ lt "a" "b" }}	OK	"true"
+{{ lt "b" "a" }}	OK	"false"
+{{ le 1 1 }}	OK	"true"
+{{ le 2 1 }}	OK	"false"
+{{ le 1 2 }}	OK	"true"
+{{ gt 2 1 }}	OK	"true"
+{{ gt 1 1 }}	OK	"false"
+{{ gt 1 2 }}	OK	"false"
+{{ ge 1 1 }}	OK	"true"
+{{ ge 1 2 }}	OK	"false"
+{{ ge 2 1 }}	OK	"true"
+{{ lt 1.5 2.5 }}	OK	"true"
+{{ eq 1.5 1.5 }}	OK	"true"
+{{ eq 3.0 3 }}	OK	"true"
+{{ lt 1.5 2 }}	OK	"true"
+{{ lt true false }}	OK	"false"
+{{ eq "a" 1 }}	OK	"false"
+{{ lt "a" 1 }}	ERR	template: :1:4:8:unable to compare a and 1
+{{ and 1 2 }}	OK	"2"
+{{ and 0 2 }}	OK	"0"
+{{ and "" "x" }}	OK	""
+{{ and "x" "y" }}	OK	"y"
+{{ and 1 2 3 }}	OK	"3"
+{{ and 0 1 2 }}	OK	"0"
+{{ or 0 2 }}	OK	"2"
+{{ or 1 2 }}	OK	"1"
+{{ or "" "" }}	OK	""
+{{ or "" "x" "y" }}	OK	"x"
+{{ or 0 0 3 }}	OK	"3"
+{{ not 0 }}	OK	"true"
+{{ not 1 }}	OK	"false"
+{{ not "" }}	OK	"true"
+{{ not "x" }}	OK	"false"
+{{ not nil }}	OK	"true"
+{{ and false (len nil) }}	OK	"false"
+{{ or true (len nil) }}	OK	"true"
+{{ and (eq 1 1) (eq 2 2) }}	OK	"true"
+{{ len "abc" }}	OK	"3"
+{{ len "äöü" }}	OK	"6"
+{{ len "" }}	OK	"0"
+{{ call 1 }}	ERR	template: :1:4:6:call requires the first argument to be a function
+{{ call "x" 1 }}	ERR	template: :1:4:10:call requires the first argument to be a function
+{{ if and true true }}y{{ else }}n{{ end }}	OK	"y"
+{{ if or false true }}y{{ else }}n{{ end }}	OK	"y"
+{{ if lt 1 2 }}y{{ else }}n{{ end }}	OK	"y"
+{{ print "a" 1 "b" }}	OK	"a1b"
+{{ println }}	OK	"\n"
+{{ print }}	OK	""
+{{ index "abc" 1 }}	OK	"98"
+{{ and }}	ERR	template: :1:4:3:and requires at least 1 argument(s)
+{{ or }}	ERR	template: :1:4:2:or requires at least 1 argument(s)
+{{ and 1 }}	OK	"1"
+{{ or 0 }}	OK	"0"
+{{ 0 | and 1 }}	OK	"0"
+{{ false | and true }}	OK	"false"
+{{ index "äb" 1 }}	OK	"164"
+{{ index "abc" 5 }}	ERR	template: :1:4:13:index out of range: 5
+{{ index "abc" -1 }}	ERR	template: :1:4:14:index out of range: -1
+{{ ne 1 2 1 }}	ERR	template: :1:4:8:ne requires exactly 2 argument(s)
+{{ eq 1 }}	ERR	template: :1:4:4:eq requires at least 2 argument(s)
+{{ and false (lt "a" 1) }}	OK	"false"
+{{ or true (lt "a" 1) }}	OK	"true"
+{{ $a := 1 }}{{ $a }}	OK	"1"
+{{ $a := 1 }}{{ $a = 2 }}{{ $a }}	OK	"2"
+{{ $a = 1 }}{{ $a }}	ERR	template: :1:4:6:variable $a not found
+{{ $a := 1 }}{{ $b := 2 }}{{ $a }}{{ $b }}	OK	"12"
+{{ range $i, $v := 3 }}{{ $i }}:{{ $v }} {{ end }}	ERR	template: :1:10:11:can't use 3 to iterate over more than one variable
+{{ $a, $b := 1 }}{{ $a }}	ERR	template: :1:6:1:too many declarations in command
+{{ range $v := 2 }}{{ $v }}{{ end }}	OK	"01"
+{{ $a := 1 }}{{ range 2 }}{{ $a = 9 }}{{ end }}{{ $a }}	OK	"9"
+{{ html nil }}	OK	"&lt;no value&gt;"
+{{ js nil }}	OK	"\\u003Cno value\\u003E"
+{{ urlquery nil }}	OK	"%3Cno+value%3E"
+{{ urlquery nil nil }}	OK	"%3Cno+value%3E%3Cno+value%3E"
+{{ html "a" nil "b" }}	OK	"a&lt;no value&gt;b"
+{{ html 1 nil }}	OK	"1&lt;no value&gt;"
+{{ and nil 1 }}	OK	"<no value>"
+{{ or nil nil }}	OK	"<no value>"
+{{ index "abc" }}	OK	"abc"
+{{ index }}	ERR	template: :1:4:5:index requires at least 1 argument(s)
+{{ index "abc" 3 }}	ERR	template: :1:4:13:index out of range: 3
+{{ index "abc" 2 }}	OK	"99"
+{{ index "" 0 }}	ERR	template: :1:4:10:index out of range: 0
+{{ index "abc" 0 0 }}	ERR	template: :1:4:15:unable to index a byte of a string with 0
+{{ index "abc" "x" }}	ERR	template: :1:4:15:unable to get x in abc
+{{ index "héllo" 2 }}	OK	"169"
+{{ index "abc" 1 2 }}	ERR	template: :1:4:15:unable to index a byte of a string with 2
+{{ eq 1 2 3 }}	OK	"false"
+{{ eq "a" "b" "c" "a" }}	OK	"true"
+{{ eq 1 "a" 1 }}	OK	"true"
+{{ eq 1 2 3 4 5 }}	OK	"false"
+{{ false | and (lt "a" 1) }}	ERR	template: :1:16:10:unable to compare a and 1
+{{ true | or (lt "a" 1) }}	ERR	template: :1:14:10:unable to compare a and 1
+{{ and 1 2 (lt "a" 1) }}	ERR	template: :1:12:10:unable to compare a and 1
+{{ or 0 "" 5 (lt "a" 1) }}	OK	"5"
+{{ and (or true (lt "a" 1)) 0 }}	OK	"0"
+{{ and (lt "a" 1) false }}	ERR	template: :1:8:10:unable to compare a and 1
+{{ len true }}	ERR	template: :1:4:8:unable to call len on true
+{{ lt 5 3.5 }}	OK	"false"
+{{ printf "%f" 3 }}	OK	"3.000000"
+{{ 2i }}	ERR	template: :1:4:21:unexpected bad number syntax: 2i in command
+{{ printf "%x" 1.5 }}	OK	"%!x(float64=1.5)"
+{{ printf "%b" 1.5 }}	OK	"%!b(float64=1.5)"
+{{ eq 18446744073709551615 -1 }}	OK	"false"
+{{ printf "%#g" 1.5 }}	OK	"1.5"
+{{ printf "%p" 1 }}	OK	"%!p(int=1)"
+{{ printf "%#v" "x" }}	OK	"x"

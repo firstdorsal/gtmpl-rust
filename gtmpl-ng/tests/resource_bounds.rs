@@ -13,11 +13,15 @@
 #![cfg(feature = "all-functions")]
 
 use gtmpl_ng::all_functions::all_functions;
-use gtmpl_ng::{Context, Template, Value};
+use gtmpl_ng::{Context, Limits, Template, Value};
 
 /// Renders with every function registered, returning the error as a string.
 fn render(source: &str) -> Result<String, String> {
-    let mut template = Template::default();
+    render_with(source, Limits::default())
+}
+
+fn render_with(source: &str, limits: Limits) -> Result<String, String> {
+    let mut template = Template::with_limits(limits);
     template.add_funcs(&all_functions());
     template.parse(source).map_err(|e| format!("parse: {e}"))?;
     template
@@ -80,12 +84,147 @@ fn ordinary_counts_still_work() {
     );
 }
 
-/// The engine itself has no counterpart to bound: `{{range}}` over an integer is Go's
-/// own construct and Go does not cap it either, but the parser refuses a literal above
-/// `i64`, and the loop body is what costs -- an empty one simply counts.
+/// A count above `i64` is refused by the number itself, before any limit is consulted,
+/// and Go reports the same thing.
 #[test]
-fn ranging_over_a_large_integer_is_not_a_function_bound() {
+fn a_count_above_an_integer_is_refused_as_an_overflow() {
     let error = render("{{ range 18446744073709551615 }}x{{ end }}")
         .expect_err("above i64, which Go reports as an overflow");
     assert!(error.contains("overflows int"), "{error}");
+}
+
+/// The list-generating functions are ranges spelled as functions -- `{{ until 10000 }}`
+/// and `{{ range 10000 }}` cost the same -- so they answer to the same limit, and
+/// raising it for one raises it for both.
+#[test]
+fn the_list_functions_follow_the_range_limit() {
+    for source in [
+        "{{ until 20000 | len }}",
+        "{{ seq 1 20000 | len }}",
+        "{{ untilStep 0 20000 1 | len }}",
+    ] {
+        let error = render(source).expect_err(source);
+        assert!(
+            error.contains("more than the 10000 this allows"),
+            "{source}: {error}"
+        );
+    }
+
+    let roomier = Limits::default().with_iterations(50_000);
+    assert_eq!(
+        render_with("{{ until 20000 | len }}", roomier).unwrap(),
+        "20000"
+    );
+    assert_eq!(
+        render_with("{{ seq 1 20000 | len }}", roomier).unwrap(),
+        "20000"
+    );
+}
+
+/// The character bound is its own knob, so a template that legitimately builds a large
+/// block of text can have it without also being allowed to iterate forever.
+#[test]
+fn the_character_limit_is_separate_from_the_range_limit() {
+    // A million characters is the default, and the next one over is refused.
+    assert_eq!(
+        render(r#"{{ repeat 1000000 "x" | len }}"#).unwrap(),
+        "1000000"
+    );
+    let error = render(r#"{{ repeat 1000001 "x" | len }}"#).expect_err("one past the limit");
+    assert!(
+        error.contains("more than the 1000000 this allows"),
+        "{error}"
+    );
+
+    // Lowering it leaves the range limit alone: how far `until` may *count* is
+    // `iterations`' business, and 30 is far below both. (A list weighs its elements
+    // plus their contents, so thirty numbers weigh sixty against the budget of 100.)
+    let tighter = Limits::default().with_function_output(100);
+    let error = render_with(r#"{{ repeat 1000 "x" }}"#, tighter).expect_err("over the 100");
+    assert!(error.contains("more than the 100 this allows"), "{error}");
+    assert_eq!(render_with("{{ until 30 | len }}", tighter).unwrap(), "30");
+
+    // What it does bound is the size of any value a function hands back -- that is
+    // the general cap that stops `{{ $s = print $s $s }}` from doubling forever --
+    // so a list of 5000 elements against a budget of 100 is refused as a value even
+    // though the iteration count is allowed.
+    let error = render_with("{{ until 5000 | len }}", tighter)
+        .expect_err("5000 elements against a produced-value budget of 100");
+    assert!(
+        error.contains("a function produced a value larger than the 100 allowed"),
+        "{error}"
+    );
+
+    // `mowsRandomString` cannot exhaust memory -- it parses its length as a `u16` --
+    // but a caller who lowered the limit meant it for every generating function.
+    let error = render_with(r#"{{ mowsRandomString "Aa" 500 }}"#, tighter)
+        .expect_err("500 characters against a limit of 100");
+    assert!(error.contains("more than the 100 this allows"), "{error}");
+}
+
+/// Opting out has to reach the functions too, which is the whole reason the limit is
+/// readable from them at all.
+#[test]
+fn unlimited_reaches_the_generating_functions() {
+    assert_eq!(
+        render_with("{{ until 2000000 | len }}", Limits::unlimited()).unwrap(),
+        "2000000"
+    );
+    assert_eq!(
+        render_with(r#"{{ repeat 2000000 "x" | len }}"#, Limits::unlimited()).unwrap(),
+        "2000000"
+    );
+}
+
+/// `indent` and `replace` multiply: the spaces per line, and the growth per match.
+/// Each input passes its own check, and the product was 10^11 bytes -- the allocator
+/// abort the limits exist to prevent. The product is judged before the allocation.
+#[test]
+fn the_multiplying_functions_bound_their_product() {
+    let cases = [
+        "{{ indent 999999 (repeat 100000 \"x\\n\") }}",
+        r#"{{ replace "x" (repeat 999999 "y") (repeat 1000000 "x") }}"#,
+    ];
+    for source in cases {
+        let started = std::time::Instant::now();
+        let error = render(source).expect_err(source);
+        assert!(
+            error.contains("this allows"),
+            "{source} failed for another reason: {error}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{source}: the product must be refused before it is built"
+        );
+    }
+
+    // The shapes a real chart uses stay untouched.
+    assert_eq!(render("{{ indent 2 \"a\\nb\" }}").unwrap(), "  a\n  b");
+    assert_eq!(render(r#"{{ replace "o" "0" "foo" }}"#).unwrap(), "f00");
+}
+
+/// The helm list constructor is another way to nest a value one level per call, and
+/// `Clone`, `Drop` and `Display` recurse per level: measured, 10 001 levels aborted a
+/// 2 MiB thread. The depth cap refuses it whatever the budgets say.
+#[test]
+fn a_list_cannot_nest_its_way_off_the_stack() {
+    let error = render_with(
+        r#"{{ $x := list 1 }}{{ range 10000 }}{{ $x = list $x }}{{ end }}{{ $x }}"#,
+        Limits::unlimited(),
+    )
+    .expect_err("10000 levels against a cap of 128");
+    assert!(
+        error.contains("a function produced a value nested deeper than the 128 levels allowed"),
+        "{error}"
+    );
+}
+
+/// Outside a render there is no template to read limits from, so the default stands --
+/// which is what keeps a function called directly from a unit test bounded.
+#[test]
+fn the_default_applies_outside_a_render() {
+    assert_eq!(gtmpl_ng::limits::active(), Limits::default());
+    let error = gtmpl_ng::helm_functions::lists::until(&[Value::from(9_999_999_999i64)])
+        .expect_err("called straight, with no render around it");
+    assert!(error.to_string().contains("this allows"), "{error}");
 }

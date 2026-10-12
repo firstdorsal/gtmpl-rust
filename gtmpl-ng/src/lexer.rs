@@ -58,6 +58,11 @@ lazy_static! {
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq)]
+// Two variants are never produced: `ItemComplex`, because this engine deliberately
+// refuses complex literals (pinned by the `{{ 2i }}` conformance case), and
+// `ItemKeyword`, which Go's lexer also only uses as a marker to compare against.
+// They stay so the taxonomy keeps matching Go's `itemType` one to one.
+#[allow(dead_code)]
 pub enum ItemType {
     ItemError,        // error occurred; value is text of error
     ItemBool,         // boolean constant

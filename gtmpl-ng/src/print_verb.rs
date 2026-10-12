@@ -406,7 +406,7 @@ fn escape_into(out: &mut String, c: char, quote: char, ascii_only: bool) {
 /// punctuation and symbols, so the invisible format characters (a zero-width space, a
 /// byte-order mark, a bidi override), the private-use areas and the unassigned code
 /// points are all escaped.
-fn is_printable(c: char) -> bool {
+pub(crate) fn is_printable(c: char) -> bool {
     let scalar = c as u32;
     if scalar <= 0xFF {
         return (0x20..=0x7E).contains(&scalar)

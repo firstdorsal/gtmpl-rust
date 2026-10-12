@@ -12,7 +12,7 @@ is what a template parses its literals into and what a context hands it back.
 
 ```toml
 [dependencies]
-gtmpl_value_ng = "0.10"
+gtmpl_value_ng = "1"
 ```
 
 Builds on Rust 1.85 and newer, with either feature below enabled or both, which CI
@@ -48,7 +48,7 @@ Enable the `gtmpl_value_compat` feature and `Value` gains a `TryFrom` conversion
 migrated one call site at a time:
 
 ```toml
-gtmpl_value_ng = { version = "0.10", features = ["gtmpl_value_compat"] }
+gtmpl_value_ng = { version = "1", features = ["gtmpl_value_compat"] }
 ```
 
 ```rust

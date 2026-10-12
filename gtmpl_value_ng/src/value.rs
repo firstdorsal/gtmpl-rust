@@ -7,6 +7,7 @@ use thiserror::Error;
 pub use crate::number::{Number, NumberKind};
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum FuncError {
     #[error("unable to convert argument from value")]
     UnableToConvertFromValue,
@@ -14,6 +15,25 @@ pub enum FuncError {
     AtLeastXArgs(String, usize),
     #[error("{0} requires exactly {1} argument(s)")]
     ExactlyXArgs(String, usize),
+    /// A function refused to produce as much as the template asked for. `what` names
+    /// the unit being counted ("characters", "elements"), so the message says which
+    /// argument to look at.
+    #[error("{function}: {count} {what} is more than the {limit} this allows")]
+    TooMuchOutput {
+        function: String,
+        count: usize,
+        what: String,
+        limit: usize,
+    },
+    /// An index outside the indexed value, carried as text so a non-numeric key can
+    /// be named too.
+    #[error("index out of range: {index}")]
+    IndexOutOfRange { index: String },
+    /// A certificate validity that no certificate date can carry.
+    #[error(
+        "{function}: a validity of {days} days is further off than a certificate date can reach"
+    )]
+    InvalidValidity { function: String, days: i64 },
     #[error("{0}")]
     Generic(String),
     #[error(transparent)]

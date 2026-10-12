@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 fn render(tmpl_str: &str, ctx: Value) -> Result<String, String> {
     let mut tmpl = Template::default();
-    tmpl.add_funcs(&HELM_FUNCTIONS);
+    tmpl.add_funcs(HELM_FUNCTIONS);
     tmpl.parse(tmpl_str).map_err(|e| format!("parse: {e}"))?;
     tmpl.render(&Context::from(ctx))
         .map_err(|e| format!("exec: {e}"))
