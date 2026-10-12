@@ -2,6 +2,29 @@
 
 All three crates in this repository share one version and are released together.
 
+## [0.10.1] - 2026-10-12
+
+### Security
+
+- **A template could exhaust memory through ten of the Helm functions.** `repeat`,
+  `until`, `untilStep`, `seq`, `indent` and the four `rand*` generators read a count
+  out of the template and used it directly as an allocation size, so
+  `{{ until 9999999999 }}` and `{{ repeat 9999999999 "x" }}` aborted the process with
+  a core dump — from a template literal alone, with no context data involved, and past
+  the `Result` the API returns. Go recovers a panicking template function into a
+  template error, which is why Helm survives the same input; this engine returns
+  `Result`, so the request has to be refused instead. They now stop at a million, the
+  line `printf` already held on a width or precision, and `repeat` bounds the product
+  rather than the count. `tests/resource_bounds.rs` holds all ten.
+
+### Fixed
+
+- **`untilStep` read its arguments in the wrong order.** Helm documents
+  `untilStep start stop step`, where `untilStep 3 6 2` is `[3 5]`; this read the second
+  argument as the step and the third as the stop, so that example answered with an
+  empty list. Silently, which is worse than refusing it — and the test that existed had
+  recorded the implementation's order rather than Helm's.
+
 ## [0.10.0] - 2026-10-12
 
 ### Added

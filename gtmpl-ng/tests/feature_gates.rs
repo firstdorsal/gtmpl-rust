@@ -1,16 +1,26 @@
 //! Says out loud what a default `cargo test` run does not cover.
 //!
-//! A plain `cargo test` runs 244 tests; `--all-features` runs 444. The 200 difference
-//! is everything behind the optional function registries: the `helm_functions` and
-//! `mows_functions` unit tests inside `src/`, and the `panic_audit.rs` and
-//! `panic_regressions.rs` suites, which compile to nothing without the feature and
-//! report "running 0 tests ... ok" — so a contributor running the obvious command sees
-//! all green having exercised none of it.
+//! A plain `cargo test` runs far fewer tests than `--all-features` does. The
+//! difference is everything behind the optional function registries: the
+//! `helm_functions` and `mows_functions` unit tests inside `src/`, and the
+//! `panic_audit.rs`, `panic_regressions.rs` and `resource_bounds.rs` suites, which
+//! compile to nothing without the feature and report "running 0 tests ... ok" — so a
+//! contributor running the obvious command sees all green having exercised none of it.
 //!
 //! Each appears here as an ignored test instead, naming the feature it needs, so the
 //! run says what it skipped. Run everything with
 //! `cargo test --workspace --all-features`, or the `cargo test-all` alias, which is
 //! the feature set CI uses.
+
+/// The suite that holds the memory bounds on the generating functions. Every case in
+/// it aborted the process before those bounds existed, so a run that skips it silently
+/// is exactly what must not happen.
+#[test]
+#[cfg_attr(
+    not(feature = "all-functions"),
+    ignore = "needs --all-features: resource_bounds.rs needs every function registry"
+)]
+fn the_resource_bound_suite_ran() {}
 
 /// The two suites whose whole purpose is catching panic regressions.
 #[test]

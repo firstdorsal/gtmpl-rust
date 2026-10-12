@@ -292,6 +292,9 @@ Rust 1.85, which CI checks on that exact toolchain.
   instead.
 - **Map keys are iterated in sorted order**, so the same input always renders the same
   bytes.
+- **A generating function is capped at a million.** `repeat`, `until`, `seq`,
+  `indent` and the `rand*` family refuse a larger count instead of allocating for it,
+  so a template cannot exhaust memory by asking.
 - **Numbers compare permissively.** `{{ eq 3.0 3 }}` answers `true` where Go refuses
   with "incompatible types for comparison".
 

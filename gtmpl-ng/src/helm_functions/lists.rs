@@ -383,6 +383,7 @@ pub fn until(args: &[Value]) -> Result<Value, FuncError> {
         .parse::<i64>()
         .map_err(|_| FuncError::Generic("Argument must be a number".to_string()))?;
 
+    let count = crate::helm_functions::bounded_count(count, "elements", "until")?;
     let result: Vec<Value> = (0..count).map(|i| Value::Number(i.into())).collect();
     Ok(Value::Array(result))
 }
@@ -393,11 +394,15 @@ pub fn until_step(args: &[Value]) -> Result<Value, FuncError> {
         "This function requires exactly 3 arguments.".to_string(),
         3,
     ))?;
-    let step = args.get(1).ok_or(FuncError::ExactlyXArgs(
+    // `untilStep start stop step`, as Helm documents it: `untilStep 3 6 2` is `[3 5]`.
+    // This used to read the second argument as the step and the third as the stop, so
+    // that example answered with an empty list instead -- silently, which is worse
+    // than refusing it.
+    let end = args.get(1).ok_or(FuncError::ExactlyXArgs(
         "This function requires exactly 3 arguments.".to_string(),
         3,
     ))?;
-    let end = args.get(2).ok_or(FuncError::ExactlyXArgs(
+    let step = args.get(2).ok_or(FuncError::ExactlyXArgs(
         "This function requires exactly 3 arguments.".to_string(),
         3,
     ))?;
@@ -406,19 +411,28 @@ pub fn until_step(args: &[Value]) -> Result<Value, FuncError> {
         .to_string()
         .parse::<i64>()
         .map_err(|_| FuncError::Generic("Start must be a number".to_string()))?;
+    let end = end
+        .to_string()
+        .parse::<i64>()
+        .map_err(|_| FuncError::Generic("Stop must be a number".to_string()))?;
     let step = step
         .to_string()
         .parse::<i64>()
         .map_err(|_| FuncError::Generic("Step must be a number".to_string()))?;
-    let end = end
-        .to_string()
-        .parse::<i64>()
-        .map_err(|_| FuncError::Generic("End must be a number".to_string()))?;
 
     if step == 0 {
         return Err(FuncError::Generic("Step cannot be zero".to_string()));
     }
 
+    // The loop itself is the bound here: a step that never reaches the end simply
+    // stops, so what needs checking is how many values fit between the two.
+    crate::helm_functions::bounded_count(
+        end.saturating_sub(start)
+            .saturating_div(step)
+            .saturating_abs(),
+        "elements",
+        "untilStep",
+    )?;
     let mut result = Vec::new();
     if step > 0 {
         let mut i = start;
@@ -458,11 +472,17 @@ pub fn seq(args: &[Value]) -> Result<Value, FuncError> {
         start
     };
 
-    let result: Vec<Value> = if args.len() == 1 {
-        (1..=start).map(|i| Value::Number(i.into())).collect()
+    let (from, to) = if args.len() == 1 {
+        (1, start)
     } else {
-        (start..=end).map(|i| Value::Number(i.into())).collect()
+        (start, end)
     };
+    crate::helm_functions::bounded_count(
+        to.saturating_sub(from).saturating_add(1),
+        "elements",
+        "seq",
+    )?;
+    let result: Vec<Value> = (from..=to).map(|i| Value::Number(i.into())).collect();
 
     Ok(Value::Array(result))
 }
@@ -753,22 +773,29 @@ mod tests {
         }
     }
 
+    /// `untilStep start stop step`. The expectations are Helm's own documented
+    /// examples; the previous test asserted the argument order this implementation
+    /// happened to have rather than the one Helm charts are written against.
     #[test]
-    fn test_until_step() {
-        // Arguments are: start, step, end
-        let result = until_step(&[
-            Value::Number(0.into()),
-            Value::Number(2.into()),
-            Value::Number(10.into()),
-        ])
-        .unwrap();
-        if let Value::Array(arr) = result {
-            assert_eq!(arr.len(), 5);
-            assert_eq!(arr[0].to_string(), "0");
-            assert_eq!(arr[1].to_string(), "2");
-            assert_eq!(arr[4].to_string(), "8");
-        } else {
-            panic!("Expected array");
-        }
+    fn until_step_takes_start_stop_step() {
+        let numbers = |args: &[Value]| match until_step(args).unwrap() {
+            Value::Array(values) => values.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            other => panic!("expected an array, got {other:?}"),
+        };
+        let number = |n: i64| Value::Number(n.into());
+
+        // Helm: "untilStep 3 6 2 will produce [3 5]".
+        assert_eq!(numbers(&[number(3), number(6), number(2)]), ["3", "5"]);
+        assert_eq!(
+            numbers(&[number(0), number(10), number(2)]),
+            ["0", "2", "4", "6", "8"]
+        );
+        // A step that steps away from the stop yields nothing rather than looping.
+        assert!(numbers(&[number(0), number(10), number(-1)]).is_empty());
+        assert_eq!(
+            numbers(&[number(5), number(0), number(-2)]),
+            ["5", "3", "1"]
+        );
+        assert!(until_step(&[number(0), number(10), number(0)]).is_err());
     }
 }
