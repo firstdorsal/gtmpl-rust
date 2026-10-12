@@ -1,5 +1,5 @@
-//! Regression tests for lexer panics that previously crashed the parse instead of
-//! returning a clean error.
+//! Regression tests for parser and lexer panics that previously crashed the parse
+//! instead of returning a clean error.
 //!
 //! Deliberately not gated behind a feature: these exercise the core lexer, which is
 //! always compiled. The older `panic_audit.rs`/`panic_regressions.rs` suites are
@@ -103,4 +103,23 @@ fn an_unknown_escape_before_a_multibyte_character_does_not_panic() {
         "expected a parse error for the invalid escape, got {:?}",
         result
     );
+}
+
+/// Previously panicked with "attempt to subtract with overflow". `{{block}}` parses its
+/// body as its own template, which sets the range depth to zero so a `{{break}}` in
+/// there is correctly refused -- but the failing body never restored the depth, and the
+/// enclosing `{{range}}` then decremented zero. Any template that put a `{{break}}` or
+/// `{{continue}}` inside a `{{block}}` or `{{define}}` within a `{{range}}` took the
+/// process down instead of reporting the error it had already found.
+#[test]
+fn a_loop_keyword_inside_a_nested_template_does_not_panic() {
+    for source in [
+        r#"{{ range 2 }}{{ block "b" . }}{{ break }}{{ end }}{{ end }}"#,
+        r#"{{ range 2 }}{{ block "b" . }}{{ continue }}{{ end }}{{ end }}"#,
+        r#"{{ range 2 }}{{ range 2 }}{{ block "b" . }}{{ break }}{{ end }}{{ end }}{{ end }}"#,
+        r#"{{ with 1 }}{{ range 2 }}{{ block "b" . }}{{ break }}{{ end }}{{ end }}{{ end }}"#,
+    ] {
+        let error = parse_and_render(source).expect_err(source);
+        assert!(error.contains("outside {{range}}"), "{source} gave {error}");
+    }
 }

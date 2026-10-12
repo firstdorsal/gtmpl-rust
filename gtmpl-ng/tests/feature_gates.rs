@@ -28,7 +28,7 @@ fn the_panic_suites_ran() {}
 )]
 fn the_helm_function_unit_tests_ran() {}
 
-/// Seven unit tests inside `src/mows_functions/`.
+/// Twelve unit tests inside `src/mows_functions/`.
 #[test]
 #[cfg_attr(
     not(feature = "mows-functions"),

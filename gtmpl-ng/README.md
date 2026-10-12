@@ -19,10 +19,10 @@ Add the following dependency to your Cargo manifest…
 
 ```toml
 [dependencies]
-gtmpl-ng = "0.9"
+gtmpl-ng = "0.10"
 # Only for `#[derive(Gtmpl)]`, which generates the conversion for a struct.
-gtmpl_derive_ng = "0.9"
-gtmpl_value_ng = "0.9"
+gtmpl_derive_ng = "0.10"
+gtmpl_value_ng = "0.10"
 ```
 
 `gtmpl_value_ng`'s whole surface is re-exported here -- `Value`, `Number`,
@@ -131,6 +131,22 @@ Behaviour follows Go's `text/template`:
 -   **Map keys are iterated in sorted order**, which makes rendering deterministic.
 -   **`{{ else }}` on a `range`** runs only when the collection is empty, and ranging
     over nil takes that branch rather than failing.
+-   **`slice`** is Go's builtin: `slice x i j` is the half-open range, `slice x i` runs
+    to the end, and `slice x` is `x`. It takes a string or a list. Go indexes a string
+    by byte and will happily return invalid UTF-8 -- `slice "héllo" 1 2` is the single
+    byte `\xc3` there -- which a Rust `String` cannot hold, so an index that falls
+    inside a character is refused instead. **With `helm-functions` enabled, Helm's
+    `slice` replaces it**, taking a list and refusing a string, exactly as Sprig's
+    replaces Go's builtin in Helm itself.
+-   **`{{ break }}` and `{{ continue }}`** work inside a `{{ range }}`, as Go has since
+    1.18. They are lexically scoped the way Go scopes them: one that no `{{ range }}`
+    encloses is a parse error, and so is one in a `{{ define }}` or `{{ block }}` body
+    called from a range, or in the range's own `{{ else }}` branch. An `{{ if }}` or
+    `{{ with }}` in between is not a barrier.
+-   **`{{ range }}` over an integer** counts from zero, as Go has since 1.22:
+    `{{ range 3 }}{{ . }}{{ end }}` is `012`, and `{{ range $i := 3 }}` binds `$i` to
+    each index. A negative count is empty, so it takes the `{{ else }}` branch, and the
+    two-variable form is an error -- there is no value to pair an index with.
 -   **A missing map key ends a field chain** and renders as `<no value>`, however deep
     the chain is, so `{{ if .a.b.c }}` is simply false when any level is absent. A
     receiver of the wrong type still errors.
@@ -158,17 +174,13 @@ than silently skipped (see `tests/feature_gates.rs`); run the whole suite with
 This is work in progress. Currently the following features are not supported:
 
 -   complex numbers
--   `{{break}}` and `{{continue}}` inside a `{{range}}`, which Go has had since 1.18
--   `{{range}}` over an integer, which Go has had since 1.22: `{{range $i := 3}}`
-    yields `0 1 2` there and is an error here
 -   `html` and `js` have not been implemented
--   Go's builtin `slice` is not in the default function set. `helm-functions` provides
-    a `slice`, with Helm's argument semantics rather than Go's
 -   numbers of different kinds compare permissively, Sprig-style rather than Go-style:
     `{{ eq 3.0 3 }}` and `{{ lt 5 3.5 }}` answer, where Go refuses with "incompatible
     types for comparison". A whole float is stored as an integer, which is what makes
     that work -- and it also means a float verb on an integer cannot be refused, so
-    `{{ printf "%f" 3 }}` gives `3.000000` where Go gives `%!f(int=3)`
+    `{{ printf "%f" 3 }}` gives `3.000000` where Go gives `%!f(int=3)`, and
+    `{{ range 3.0 }}` iterates where Go refuses to iterate a float
 -   an integer literal above `i64` is accepted and printed where Go's parser refuses it
 -   rendered with no data at all, `{{ .field }}` is an error rather than Go's
     `<no value>`
@@ -181,9 +193,6 @@ This is work in progress. Currently the following features are not supported:
     -   `%#v` renders as plain `%v` rather than Go's syntax representation
     -   `%#g` does not restore the trailing zeros Go restores
     -   `%p` and Go's struct-field `%+v` have no counterpart here
-    -   `%q` escapes what Rust's standard library can recognise as unprintable, which
-        misses the invisible format characters (a zero-width space, a byte-order mark)
-        that Go also escapes
 
 ## Enhancements
 
@@ -196,7 +205,7 @@ Enable `helm-functions` to get 152 Helm-compatible template functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.9"
+version = "0.10"
 features = ["helm-functions"]
 ```
 
@@ -225,7 +234,7 @@ Enable `mows-functions` to get 3 additional mows-specific functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.9"
+version = "0.10"
 features = ["mows-functions"]
 ```
 
@@ -240,7 +249,7 @@ Enable `all-functions` to get both Helm and mows functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.9"
+version = "0.10"
 features = ["all-functions"]
 ```
 
@@ -258,7 +267,7 @@ Enable `gtmpl_dynamic_template` in your `Cargo.toml`:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.9"
+version = "0.10"
 features = ["gtmpl_dynamic_template"]
 ```
 

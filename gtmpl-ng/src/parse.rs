@@ -60,6 +60,13 @@ pub struct Parser {
     tree_stack: VecDeque<Tree>,
     max_tree_id: TreeId,
     depth: usize,
+    /// How many `{{range}}` bodies enclose what is being parsed. `{{break}}` and
+    /// `{{continue}}` are refused at zero, which is what makes them lexically scoped:
+    /// one inside a `{{define}}` called from a range is still outside a range.
+    range_depth: usize,
+    /// The `range_depth` of each enclosing template, saved while a `{{define}}` or
+    /// `{{block}}` body is parsed as its own tree.
+    enclosing_range_depth: Vec<usize>,
 }
 
 pub struct Tree {
@@ -86,6 +93,8 @@ impl Parser {
             tree_stack: VecDeque::new(),
             max_tree_id: 0,
             depth: 0,
+            range_depth: 0,
+            enclosing_range_depth: Vec::new(),
         }
     }
 }
@@ -185,12 +194,17 @@ impl Parser {
         if let Some(t) = self.tree.take() {
             self.tree_stack.push_back(t);
         }
+        // A `{{define}}` or `{{block}}` body is its own template, so a `{{break}}` in
+        // it is outside any `{{range}}` even when the construct sits inside one.
+        self.enclosing_range_depth.push(self.range_depth);
+        self.range_depth = 0;
         self.tree_id = id;
         let t = Tree::new(name, id);
         self.tree = Some(t);
     }
 
     fn stop_parse(&mut self) -> Result<(), ParseError> {
+        self.range_depth = self.enclosing_range_depth.pop().unwrap_or(0);
         self.add_to_tree_set()?;
         self.tree = self.tree_stack.pop_back();
         self.tree_id = self.tree.as_ref().map(|t| t.id).unwrap_or(0);
@@ -415,6 +429,8 @@ impl Parser {
         let token = self.next_non_space_must("action")?;
         match token.typ {
             ItemType::ItemBlock => return self.block_control(),
+            ItemType::ItemBreak => return self.loop_control(&token),
+            ItemType::ItemContinue => return self.loop_control(&token),
             ItemType::ItemElse => return self.else_control(),
             ItemType::ItemEnd => return self.end_control(),
             ItemType::ItemIf => return self.if_control(),
@@ -466,7 +482,20 @@ impl Parser {
             pipe.col(),
             pipe.len(),
         );
-        let (list, next) = self.item_list()?;
+        // Go counts the body only, so a `{{break}}` in a `{{range}}`'s own `{{else}}`
+        // is refused: that branch runs when there was nothing to iterate.
+        //
+        // The depth is put back by restoring what it was, not by decrementing. A
+        // `{{block}}` in the body parses as its own template and sets the depth to
+        // zero; if that body then fails -- which is exactly what a `{{break}}` inside
+        // it does -- it never restores, and a decrement here underflowed and panicked.
+        let outer_range_depth = self.range_depth;
+        if context == "range" {
+            self.range_depth += 1;
+        }
+        let body = self.item_list();
+        self.range_depth = outer_range_depth;
+        let (list, next) = body?;
         // Where this construct's text stops: just past the `{{end}}` that closed it.
         let mut body_end = next.extent();
         let else_list = match *next.typ() {
@@ -523,6 +552,32 @@ impl Parser {
         Ok(Nodes::With(WithNode::new_with(
             span, pipe, list, else_list, body_end,
         )))
+    }
+
+    /// `{{break}}` and `{{continue}}`, which take no arguments and must stand inside a
+    /// `{{range}}` body.
+    fn loop_control(&mut self, keyword: &Item) -> Result<Nodes, ParseError> {
+        let breaking = keyword.typ == ItemType::ItemBreak;
+        let name = if breaking { "break" } else { "continue" };
+        if self.range_depth == 0 {
+            return self.error(&format!("{{{{{name}}}}} outside {{{{range}}}}"));
+        }
+        let token = self.next_non_space_must(name)?;
+        if token.typ != ItemType::ItemRightDelim {
+            return self.error(&format!("unexpected {:?} in {{{{{name}}}}}", token.val));
+        }
+        let (tree, pos, line, col, len) = (
+            self.tree_id,
+            keyword.pos,
+            keyword.line,
+            keyword.col,
+            keyword.val.len(),
+        );
+        Ok(if breaking {
+            Nodes::Break(BreakNode::new(tree, pos, line, col, len))
+        } else {
+            Nodes::Continue(ContinueNode::new(tree, pos, line, col, len))
+        })
     }
 
     fn end_control(&mut self) -> Result<Nodes, ParseError> {
@@ -1085,6 +1140,8 @@ mod tests_mocked {
             tree_stack: VecDeque::new(),
             max_tree_id: 0,
             depth: 0,
+            range_depth: 0,
+            enclosing_range_depth: Vec::new(),
         }
     }
 

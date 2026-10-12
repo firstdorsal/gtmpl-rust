@@ -2,6 +2,57 @@
 
 All three crates in this repository share one version and are released together.
 
+## [0.10.0] - 2026-10-12
+
+### Added
+
+- **Go's builtin `slice`**, which was missing from the default function set, so a Go
+  template using it failed with "function slice not defined". It takes a string or a
+  list with Go's index rules and reports Go's messages for an index out of range, a
+  crossed pair, a third index on a string and a type that cannot be sliced. Where Go
+  indexes a string by byte and returns invalid UTF-8, an index inside a character is
+  refused instead -- a Rust `String` cannot hold the alternative. With
+  `helm-functions` enabled, Helm's `slice` replaces it, as Sprig's replaces the
+  builtin in Helm itself; a test now pins that precedence.
+- **`{{ break }}` and `{{ continue }}`**, as Go has had since 1.18. Scoped the way Go
+  scopes them, which is lexically: one that no `{{ range }}` encloses is a parse error,
+  as is one in a `{{ define }}` or `{{ block }}` body called from a range, or in the
+  range's own `{{ else }}`. An `{{ if }}` or `{{ with }}` in between is not a barrier,
+  and a `{{ break }}` in a nested range ends only that one. All twenty-two cases that
+  pin this went through Go 1.26.8 first and are recorded in `go_conformance.txt`.
+- **`{{ range }}` over an integer**, as Go has had since 1.22.
+  `{{ range 3 }}{{ . }}{{ end }}` is `012` and `{{ range $i := 3 }}` binds each index;
+  a count of zero or less takes the `{{ else }}` branch, the two-variable form is
+  refused the way Go refuses it, and a count above `i64` reports Go's "overflows int"
+  rather than trying to iterate. Checked case by case against Go 1.26.8 and recorded
+  in `go_conformance.txt`. A fractional float is still refused; a whole one iterates,
+  because this engine stores it as an integer.
+
+### Fixed
+
+- **`range` over something it cannot iterate said so in Rust's `Debug`.** The message
+  read `invalid range Number(Number { n: U(3) })`, handing the reader this crate's
+  internals; it is Go's `range can't iterate over 3` now.
+- **`mowsDigest` could never succeed.** All four of its methods — `MD5`, `SHA1`,
+  `SHA256`, `SHA512` — read the raw digest bytes as UTF-8, which they are not for any
+  practical input, so every call returned "Invalid hash". It returns hexadecimal now,
+  as `sha256sum` and every other hash function here does, and an unknown method names
+  the four that work. The function had no test over its success path, which is how it
+  shipped; it has one per method now, against the values `md5sum`, `sha1sum`,
+  `sha256sum` and `sha512sum` give for the same input.
+
+### Changed
+
+- **A context field no longer has to be `Clone`.** `From<Vec<T>>`,
+  `From<HashMap<String, T>>` and `From<Option<T>>` take their argument by value and
+  then cloned every element out of it, so a struct holding a list of another derived
+  struct had to derive `Clone` through the whole tree — and a type that cannot be
+  `Clone` could not appear in a context at all. They consume what they are given now.
+  Relaxing a bound, so nothing that compiled stops compiling.
+- The repository's front page documents how to use the engine rather than how the
+  repository is laid out, with a complete example and a function-registration example
+  that CI compiles and runs with warnings denied.
+
 ## [0.9.0] - 2026-10-12
 
 The value type and the derive macro now live in this repository as `gtmpl_value_ng`

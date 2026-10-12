@@ -122,7 +122,7 @@ impl From<Func> for Value {
 
 impl<T> From<Vec<T>> for Value
 where
-    T: Into<Value> + Clone,
+    T: Into<Value>,
 {
     /// Convert `Vec` to `Value`
     ///
@@ -135,7 +135,7 @@ where
     /// let x: Value = v.into();
     /// ```
     fn from(f: Vec<T>) -> Self {
-        Value::Array(f.iter().cloned().map(|x| x.into()).collect())
+        Value::Array(f.into_iter().map(Into::into).collect())
     }
 }
 
@@ -160,7 +160,7 @@ where
 
 impl<T> From<HashMap<String, T>> for Value
 where
-    T: Into<Value> + Clone,
+    T: Into<Value>,
 {
     /// Convert `HashMap<String, T>` to `Value`
     ///
@@ -175,17 +175,13 @@ where
     /// let x: Value = m.into();
     /// ```
     fn from(f: HashMap<String, T>) -> Self {
-        Value::Map(
-            f.iter()
-                .map(|(s, x)| (s.clone(), x.clone().into()))
-                .collect(),
-        )
+        Value::Map(f.into_iter().map(|(key, x)| (key, x.into())).collect())
     }
 }
 
 impl<T> From<Option<T>> for Value
 where
-    T: Into<Value> + Clone,
+    T: Into<Value>,
 {
     /// Convert `Option<T>` to `Value`
     ///

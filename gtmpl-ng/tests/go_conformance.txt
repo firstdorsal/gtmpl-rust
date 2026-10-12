@@ -9,9 +9,9 @@
 #     awk -F'\t' '!/^#/ && NF>0 {print $1}' go_conformance.txt |
 #         go run go_conformance.go > /tmp/go-side.txt
 #
-# Of 237 cases, 217 are byte-identical to Go. The 20 that are not break down as:
+# Of 294 cases, 249 are byte-identical to Go. The 45 that are not break down as:
 #
-#   8  the same failure reported in different words. Go writes
+#   31 the same failure reported in different words. Go writes
 #       `template: t:1: illegal number syntax: "0x1.8"`; this engine adds the line,
 #       column and length, which is the point of its error context. Same class, same
 #       cause, so these are not behavioural differences.
@@ -20,7 +20,7 @@
 #       the debug quoting differs -- Rust writes a control character as `\u{5}` where
 #       Go writes `\x05`. Verified with a byte comparison.
 #
-#   11  real differences, all of them deliberate:
+#   13  real differences, all of them deliberate:
 #
 #       `{{ printf "%s" 18446744073709551615 }}`
 #           Go's parser refuses the literal -- "overflows int" -- and never reaches
@@ -32,14 +32,23 @@
 #           absent and prints `<nil>`; this engine reports that nil has no fields.
 #           See the README's limitations.
 #
+#       `{{ printf "%q" (slice "héllo" 1 2) }}`
+#           Go indexes a string by byte and is content to produce invalid UTF-8: the
+#           answer there is the single byte `\xc3`, half of the `é`. A Rust `String`
+#           cannot hold that, so the index is refused rather than answered with
+#           something else. Every index that lands on a character boundary agrees.
+#
 #       `{{ printf "%f" 1 }}`, `{{ printf "%e" 1 }}`, `{{ printf "%.*f" "x" 5 }}`,
-#       `{{ 1e6 }}`, `{{ 1234567.0 }}`, `{{ printf "%v" 1e19 }}`
-#           All six follow from one decision: a whole float is stored as an integer so
-#           that `{{ 3.0 }}` renders `3` the way Go does. A float verb then cannot be
-#           refused on a true integer, and a whole float never reaches the exponent
-#           notation Go switches to at 1e6. The alternative is to keep floats apart,
-#           which would change `as_u64()` on every whole float a caller builds and
-#           move output such as `1000000` to `1e+06`. See the README's limitations.
+#       `{{ 1e6 }}`, `{{ 1234567.0 }}`, `{{ printf "%v" 1e19 }}`,
+#       `{{ range 3.0 }}{{ . }}{{ end }}`
+#           All seven follow from one decision: a whole float is stored as an integer
+#           so that `{{ 3.0 }}` renders `3` the way Go does. A float verb then cannot
+#           be refused on a true integer, a whole float never reaches the exponent
+#           notation Go switches to at 1e6, and `range` cannot tell `3.0` from `3` --
+#           Go refuses to iterate a float, this engine iterates the integer it was
+#           collapsed to. The alternative is to keep floats apart, which would change
+#           `as_u64()` on every whole float a caller builds and move output such as
+#           `1000000` to `1e+06`. See the README's limitations.
 #
 # Six cases are deliberately not here: a width or precision near Go's million-digit
 # cap produces a megabyte of output each, which is not worth shipping in a fixture.
@@ -283,3 +292,60 @@
 {{ printf "%.[1]d" 1 }}	OK	"1"
 {{ printf "%[1]*d" 2 3 }}	OK	" 3"
 {{ printf "%*[1]d" 2 3 }}	OK	" 2"
+{{ range 3 }}{{ . }}{{ end }}	OK	"012"
+{{ range $i := 3 }}{{ $i }},{{ end }}	OK	"0,1,2,"
+{{ range 1 }}{{ . }}{{ end }}	OK	"0"
+{{ range 2 }}[{{ . }}]{{ end }}	OK	"[0][1]"
+{{ range 0 }}x{{ else }}empty{{ end }}	OK	"empty"
+{{ range -1 }}x{{ else }}empty{{ end }}	OK	"empty"
+{{ range -3 }}x{{ else }}empty{{ end }}	OK	"empty"
+{{ range 3.0 }}{{ . }}{{ end }}	OK	"012"
+{{ range $i, $v := 3 }}{{ $i }}={{ $v }},{{ end }}	ERR	template: :1:10:11:can't use 3 to iterate over more than one variable
+{{ range 1.5 }}x{{ end }}	ERR	template: :1:10:3:range can't iterate over 1.5
+{{ range "ab" }}x{{ end }}	ERR	template: :1:10:4:range can't iterate over ab
+{{ range 9223372036854775808 }}x{{ end }}	ERR	template: :1:10:19:9223372036854775808 overflows int
+{{ range 18446744073709551615 }}x{{ end }}	ERR	template: :1:10:20:18446744073709551615 overflows int
+{{ range 5 }}{{ . }}{{ if eq . 2 }}{{ break }}{{ end }}{{ end }}	OK	"012"
+{{ range 5 }}{{ if eq . 2 }}{{ continue }}{{ end }}{{ . }}{{ end }}	OK	"0134"
+{{ range 3 }}a{{ break }}b{{ end }}	OK	"a"
+{{ range 3 }}a{{ continue }}b{{ end }}	OK	"aaa"
+{{ range 2 }}{{ range 2 }}i{{ break }}{{ end }}o{{ end }}	OK	"ioio"
+{{ range 2 }}{{ with 1 }}{{ break }}{{ end }}x{{ end }}	OK	""
+{{ range 0 }}x{{ break }}{{ else }}empty{{ end }}	OK	"empty"
+{{ range 3 }}{{ if eq . 1 }}{{ break }}{{ else }}{{ . }}{{ end }}{{ end }}	OK	"0"
+{{ range $i := 5 }}{{ if gt $i 2 }}{{ break }}{{ end }}{{ $i }}{{ end }}	OK	"012"
+{{ range 2 }}{{ range 0 }}i{{ else }}{{ break }}{{ end }}{{ end }}	OK	""
+{{ range 2 }}{{ if . }}{{ else }}{{ break }}{{ end }}a{{ end }}	OK	""
+{{ range 2 }}{{ continue }}{{ break }}{{ end }}	OK	""
+{{ range 2 }}{{ break }}{{ continue }}{{ end }}	OK	""
+{{ break }}	ERR	template: :1:4:5:{{break}} outside {{range}}
+{{ continue }}	ERR	template: :1:4:8:{{continue}} outside {{range}}
+{{ if true }}{{ break }}{{ end }}	ERR	template: :1:17:5:{{break}} outside {{range}}
+{{ range 0 }}x{{ else }}{{ break }}{{ end }}	ERR	template: :1:28:5:{{break}} outside {{range}}
+{{ range 0 }}x{{ else }}{{ continue }}{{ end }}	ERR	template: :1:28:8:{{continue}} outside {{range}}
+{{ define "t" }}{{ break }}{{ end }}{{ range 2 }}{{ template "t" }}{{ end }}	ERR	template: t:1:20:5:{{break}} outside {{range}}
+{{ range 2 }}{{ block "b" . }}{{ break }}{{ end }}{{ end }}	ERR	template: b:1:34:5:{{break}} outside {{range}}
+{{ range 3 }}{{ break 1 }}{{ end }}	ERR	template: :1:23:1:unexpected "1" in {{break}}
+{{ range 3 }}{{ breaknot }}{{ end }}	ERR	template: :1:17:8:function breaknot not defined
+{{ slice "hello" 1 3 }}	OK	"el"
+{{ slice "hello" 1 }}	OK	"ello"
+{{ slice "hello" }}	OK	"hello"
+{{ len (slice "hello" 1 3) }}	OK	"2"
+{{ printf "%v" (slice "abcdef" 2 4) }}	OK	"cd"
+{{ printf "%q" (slice "héllo" 1 3) }}	OK	"\"é\""
+{{ slice (slice "hello" 1) 1 }}	OK	"llo"
+{{ slice "" 0 }}	OK	""
+{{ slice "" 0 0 }}	OK	""
+{{ printf "%q" (slice "hello" 5) }}	OK	"\"\""
+{{ printf "%q" (slice "hello" 2 2) }}	OK	"\"\""
+{{ $l := slice "abcde" 0 5 }}{{ slice $l 1 3 }}	OK	"bc"
+{{ slice "hello" 1 3 4 }}	ERR	template: :1:4:19:cannot 3-index slice a string
+{{ slice "hello" 3 1 }}	ERR	template: :1:4:17:invalid slice index: 3 > 1
+{{ slice "hello" 0 9 }}	ERR	template: :1:4:17:index out of range: 9
+{{ slice "hello" -1 }}	ERR	template: :1:4:16:index out of range: -1
+{{ slice "" 1 }}	ERR	template: :1:4:10:index out of range: 1
+{{ slice 5 1 }}	ERR	template: :1:4:9:can't slice item of type int
+{{ slice 1.5 1 }}	ERR	template: :1:4:11:can't slice item of type float64
+{{ slice true 1 }}	ERR	template: :1:4:12:can't slice item of type bool
+{{ slice nil 1 }}	ERR	template: :1:4:11:slice of untyped nil
+{{ printf "%q" (slice "héllo" 1 2) }}	ERR	template: :1:16:20:slice index 2 is inside a character of "héllo"
