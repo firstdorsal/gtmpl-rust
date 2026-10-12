@@ -1,7 +1,6 @@
 //! Mows-specific cryptographic functions
 
 use crate::{FuncError, Value};
-use core::str;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 
@@ -19,32 +18,19 @@ pub fn mows_digest(args: &[Value]) -> Result<Value, FuncError> {
     let to_be_hashed = to_be_hashed.to_string();
     let to_be_hashed = to_be_hashed.as_bytes();
 
+    // Hexadecimal, as every other hash function here returns and as `sha256sum`
+    // returns. This used to read the raw digest bytes as UTF-8, which they are not for
+    // any practical input, so all four methods only ever returned "Invalid hash".
     let hash = match method.as_str() {
-        "MD5" => {
-            let digest = md5::compute(to_be_hashed).to_ascii_lowercase();
-            str::from_utf8(&digest)
-                .map_err(|_| FuncError::Generic("Invalid hash".to_string()))?
-                .to_string()
+        "MD5" => format!("{:x}", md5::compute(to_be_hashed)),
+        "SHA1" => format!("{:x}", Sha1::digest(to_be_hashed)),
+        "SHA256" => format!("{:x}", Sha256::digest(to_be_hashed)),
+        "SHA512" => format!("{:x}", Sha512::digest(to_be_hashed)),
+        other => {
+            return Err(FuncError::Generic(format!(
+                "mowsDigest: unknown hash method {other:?}, expected MD5, SHA1, SHA256 or SHA512"
+            )))
         }
-        "SHA1" => {
-            let digest = Sha1::digest(to_be_hashed);
-            str::from_utf8(digest.as_slice())
-                .map_err(|_| FuncError::Generic("Invalid hash".to_string()))?
-                .to_string()
-        }
-        "SHA256" => {
-            let digest = Sha256::digest(to_be_hashed);
-            str::from_utf8(digest.as_slice())
-                .map_err(|_| FuncError::Generic("Invalid hash".to_string()))?
-                .to_string()
-        }
-        "SHA512" => {
-            let digest = Sha512::digest(to_be_hashed);
-            str::from_utf8(digest.as_slice())
-                .map_err(|_| FuncError::Generic("Invalid hash".to_string()))?
-                .to_string()
-        }
-        _ => return Err(FuncError::Generic("Invalid hash method".to_string())),
     };
 
     Ok(Value::from(hash))
@@ -101,6 +87,51 @@ pub fn random_string(args: &[Value]) -> Result<Value, FuncError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every method returned "Invalid hash" before this: the digest bytes were read as
+    /// UTF-8 instead of being hex-encoded, and nothing tested the success path.
+    /// The expectations come from coreutils `md5sum`/`sha1sum`/`sha256sum`/`sha512sum`
+    /// over the same input.
+    #[test]
+    fn digest_matches_the_reference_implementations() {
+        let cases = [
+            ("MD5", "5d41402abc4b2a76b9719d911017c592"),
+            ("SHA1", "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"),
+            (
+                "SHA256",
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            ),
+            (
+                "SHA512",
+                "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca7\
+                 2323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043",
+            ),
+        ];
+        for (method, expected) in cases {
+            let hashed = mows_digest(&[Value::from(method), Value::from("hello")])
+                .unwrap_or_else(|e| panic!("{method} failed: {e}"));
+            assert_eq!(
+                hashed.to_string(),
+                expected.replace([' ', '\n'], ""),
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_digest_method_names_the_ones_that_work() {
+        let error = mows_digest(&[Value::from("sha256"), Value::from("hello")])
+            .expect_err("lower case is not one of the four");
+        let message = error.to_string();
+        assert!(message.contains("\"sha256\""), "{message}");
+        assert!(message.contains("SHA256"), "{message}");
+    }
+
+    #[test]
+    fn a_digest_needs_both_arguments() {
+        assert!(mows_digest(&[]).is_err());
+        assert!(mows_digest(&[Value::from("SHA256")]).is_err());
+    }
 
     #[test]
     fn test_random_string_alpha() {

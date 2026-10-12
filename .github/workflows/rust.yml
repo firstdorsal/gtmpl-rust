@@ -62,8 +62,18 @@ jobs:
           rustup run "$msrv" cargo check --workspace \
             --features gtmpl-ng/gtmpl_dynamic_template,gtmpl-ng/gtmpl_value_compat,gtmpl-ng/mows-functions,gtmpl_value_ng/serde
 
+  # The engine's README is doc-tested through `include_str!`; the root README cannot be,
+  # so its examples are compiled and run here. Without this they are the only code in
+  # the repository nothing checks -- and they are the first code a reader runs.
+  readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the README examples
+        run: bash ci/check-readme-examples.sh
+
   publish:
-    needs: [build, msrv]
+    needs: [build, msrv, readme]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:

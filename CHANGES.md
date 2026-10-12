@@ -2,6 +2,23 @@
 
 All three crates in this repository share one version and are released together.
 
+## Unreleased
+
+### Fixed
+
+- **`mowsDigest` could never succeed.** All four of its methods — `MD5`, `SHA1`,
+  `SHA256`, `SHA512` — read the raw digest bytes as UTF-8, which they are not for any
+  practical input, so every call returned "Invalid hash". It returns hexadecimal now,
+  as `sha256sum` and every other hash function here does, and an unknown method names
+  the four that work. The function had no test over its success path, which is how it
+  shipped; it has one per method now, against the values `md5sum`, `sha1sum`,
+  `sha256sum` and `sha512sum` give for the same input.
+
+### Changed
+
+- The repository's front page documents how to use the engine rather than how the
+  repository is laid out, with a complete example that CI compiles and runs.
+
 ## [0.9.0] - 2026-10-12
 
 The value type and the derive macro now live in this repository as `gtmpl_value_ng`
