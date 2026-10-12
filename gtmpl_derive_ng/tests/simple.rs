@@ -83,7 +83,10 @@ fn a_hashmap_field_becomes_a_map() {
 
 #[test]
 fn a_vec_of_structs_becomes_an_array_of_objects() {
-    #[derive(Gtmpl, Clone)]
+    // Deliberately not `Clone`: a field of `Vec<T>` used to demand it, so a struct
+    // holding a list of another struct had to derive `Clone` through the whole tree
+    // for a conversion that owns its input and never needed a copy.
+    #[derive(Gtmpl)]
     struct Foo {
         name: String,
         value: i64,
@@ -142,4 +145,46 @@ fn a_unit_struct_becomes_an_empty_object() {
     struct Foo;
 
     assert!(fields(Value::from(Foo)).is_empty());
+}
+
+#[test]
+fn a_field_that_cannot_be_cloned_still_converts() {
+    // `File` is neither `Clone` nor `Into<Value>`, so it stands in for any type a
+    // consumer wraps: what matters is that holding one does not stop the struct around
+    // it from being a context.
+    struct NotClonable(#[allow(dead_code)] std::fs::File);
+
+    impl From<NotClonable> for Value {
+        fn from(_: NotClonable) -> Value {
+            Value::from("opaque")
+        }
+    }
+
+    #[derive(Gtmpl)]
+    struct Foo {
+        items: Vec<NotClonable>,
+        maybe: Option<NotClonable>,
+        named: HashMap<String, NotClonable>,
+    }
+
+    let file = || NotClonable(std::fs::File::open("/dev/null").expect("/dev/null opens"));
+    let fields = fields(Value::from(Foo {
+        items: vec![file()],
+        maybe: Some(file()),
+        named: [("key".to_owned(), file())].into_iter().collect(),
+    }));
+
+    assert_eq!(
+        fields.get("items"),
+        Some(&Value::Array(vec![Value::from("opaque")]))
+    );
+    assert_eq!(fields.get("maybe"), Some(&Value::from("opaque")));
+    assert_eq!(
+        fields.get("named"),
+        Some(&Value::Map(
+            [("key".to_owned(), Value::from("opaque"))]
+                .into_iter()
+                .collect()
+        ))
+    );
 }

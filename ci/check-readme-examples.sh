@@ -48,6 +48,9 @@ for index, block in enumerate(blocks):
 print(f"extracted {len(blocks)} rust blocks")
 EXTRACT
 
+# A warning in a documented example is a defect: whoever copies it gets the warning too.
+export RUSTFLAGS="-D warnings"
+
 cd "$workspace"
 for binary in src/bin/*.rs; do
     name="$(basename "$binary" .rs)"

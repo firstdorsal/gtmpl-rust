@@ -16,8 +16,15 @@ All three crates in this repository share one version and are released together.
 
 ### Changed
 
+- **A context field no longer has to be `Clone`.** `From<Vec<T>>`,
+  `From<HashMap<String, T>>` and `From<Option<T>>` take their argument by value and
+  then cloned every element out of it, so a struct holding a list of another derived
+  struct had to derive `Clone` through the whole tree — and a type that cannot be
+  `Clone` could not appear in a context at all. They consume what they are given now.
+  Relaxing a bound, so nothing that compiled stops compiling.
 - The repository's front page documents how to use the engine rather than how the
-  repository is laid out, with a complete example that CI compiles and runs.
+  repository is laid out, with a complete example and a function-registration example
+  that CI compiles and runs with warnings denied.
 
 ## [0.9.0] - 2026-10-12
 

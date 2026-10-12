@@ -209,6 +209,40 @@ fn main() {
 }
 ```
 
+## Registering functions
+
+Each registry is a constant you hand to `add_funcs`, and your own functions go in one at
+a time with `add_func`. Each feature works on its own — `helm-functions` without
+`mows-functions`, or neither.
+
+```rust
+use gtmpl_ng::helm_functions::HELM_FUNCTIONS; // [(&str, Func); 152], needs `helm-functions`
+use gtmpl_ng::mows_functions::MOWS_FUNCTIONS; // [(&str, Func); 3], needs `mows-functions`
+use gtmpl_ng::{Context, FuncError, Template, Value};
+
+fn shout(args: &[Value]) -> Result<Value, FuncError> {
+    let text = args.first().map(ToString::to_string).unwrap_or_default();
+    Ok(Value::from(format!("{}!", text.to_uppercase())))
+}
+
+let mut tmpl = Template::default();
+tmpl.add_funcs(&HELM_FUNCTIONS); // one registry
+tmpl.add_funcs(&MOWS_FUNCTIONS); // or several
+tmpl.add_func("shout", shout); // and your own, by name
+tmpl.parse(r#"{{ shout (.name | lower) }}"#).unwrap();
+
+let mut data = std::collections::HashMap::new();
+data.insert("name".to_owned(), Value::from("Web"));
+assert_eq!(tmpl.render(&Context::from(Value::Map(data))).unwrap(), "WEB!");
+```
+
+`all-functions` adds `gtmpl_ng::all_functions::all_functions()` on top, which returns
+both sets as one `Vec<(&str, Func)>` for a single `add_funcs` call — that is the one the
+example above uses.
+
+Without any feature you still have everything Go itself provides: `printf`, `len`,
+`index`, `eq`, `ne`, `lt`, `and`, `or`, `not`, `call`, `print`, `println`.
+
 ## Feature flags
 
 | flag | what it adds |
@@ -232,7 +266,9 @@ Rust 1.85, which CI checks on that exact toolchain.
   `no field \`nope\``, because a field name that does not exist is a typo rather than
   missing data.
 - **`#[derive(Gtmpl)]` converts by value.** Build the `Value` once and clone it per
-  render, as the example does.
+  render, as the example does. A field may hold any type that is `Into<Value>`,
+  including a `Vec` or `HashMap` of another derived struct, and none of them have to be
+  `Clone`.
 - **A `Func` field is a method with no arguments.** It receives the struct it lives on
   as its only argument; a function that needs arguments is registered with `add_func`
   instead.
