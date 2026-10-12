@@ -493,6 +493,29 @@ pub fn len_fn(args: &[Value]) -> Result<Value, FuncError> {
 mod tests {
     use super::*;
 
+    /// `slice` is both Go's builtin and a Helm function, and registering the Helm set
+    /// replaces the builtin -- which is what Helm itself does, since its function map
+    /// goes over Go's builtins. So with this feature on, `slice` takes a list and
+    /// refuses a string, and that precedence is the documented behaviour rather than an
+    /// accident of registration order.
+    #[test]
+    fn the_helm_slice_replaces_gos_builtin() {
+        use crate::helm_functions::HELM_FUNCTIONS;
+        use crate::{Context, Template, Value};
+
+        let render = |source: &str| {
+            let mut tmpl = Template::default();
+            tmpl.add_funcs(&HELM_FUNCTIONS);
+            tmpl.parse(source).expect("parses");
+            tmpl.render(&Context::from(Value::Nil))
+        };
+
+        assert_eq!(render("{{ slice (list 1 2 3 4) 1 3 }}").unwrap(), "[2 3]");
+        let error = render(r#"{{ slice "hello" 1 3 }}"#)
+            .expect_err("the helm slice takes a list, not a string");
+        assert!(error.to_string().contains("must be an array"), "{error}");
+    }
+
     #[test]
     fn test_first() {
         let list = Value::Array(vec![

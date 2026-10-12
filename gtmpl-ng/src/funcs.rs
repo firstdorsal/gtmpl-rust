@@ -35,6 +35,7 @@ pub static BUILTINS: &[(&str, Func)] = &[
     ("println", println as Func),
     ("printf", printf as Func),
     ("index", index as Func),
+    ("slice", slice as Func),
     ("call", call as Func),
 ];
 
@@ -364,6 +365,92 @@ pub fn printf(args: &[Value]) -> Result<Value, FuncError> {
 /// let index = template("{{ index . 1 }}", ctx);
 /// assert_eq!(&index.unwrap(), "42");
 /// ```
+/// `slice x [i [j [k]]]`, Go's builtin.
+///
+/// `slice x` is `x` itself, `slice x i` runs from `i` to the end, and `slice x i j` is
+/// the half-open range `[i, j)`. A fourth argument is Go's capacity index, which only a
+/// list accepts and which cannot be observed from a template.
+///
+/// Go indexes a string by byte and is content to produce invalid UTF-8 --
+/// `slice "héllo" 1 2` is the single byte `\xc3` there. A Rust `String` cannot hold
+/// that, so an index that falls inside a character is refused rather than answered with
+/// something else. Every index that lands on a boundary agrees with Go.
+pub fn slice(args: &[Value]) -> Result<Value, FuncError> {
+    let (item, indices) = args
+        .split_first()
+        .ok_or_else(|| FuncError::AtLeastXArgs("slice".into(), 1))?;
+
+    let length = match item {
+        Value::String(text) => text.len(),
+        Value::Array(values) => values.len(),
+        Value::Nil => return Err(FuncError::Generic("slice of untyped nil".to_owned())),
+        other => {
+            return Err(FuncError::Generic(format!(
+                "can't slice item of type {}",
+                crate::print_verb::type_name(other).unwrap_or("nil")
+            )))
+        }
+    };
+
+    if indices.len() > 3 || (indices.len() > 2 && matches!(item, Value::String(_))) {
+        return Err(FuncError::Generic(format!(
+            "cannot {}-index slice a {}",
+            indices.len(),
+            crate::print_verb::type_name(item).unwrap_or("nil")
+        )));
+    }
+
+    // Go checks each index against the length as it reads it, then checks that they do
+    // not cross, so `slice "hello" 9 1` reports the 9 rather than the ordering.
+    let mut bounds = [0usize, length, length];
+    for (position, index) in indices.iter().enumerate() {
+        let index = match index {
+            Value::Number(number) => number.as_i64().filter(|index| *index >= 0),
+            _ => None,
+        };
+        let index = index.and_then(|index| usize::try_from(index).ok());
+        match index.filter(|index| *index <= length) {
+            Some(index) => bounds[position] = index,
+            None => {
+                return Err(FuncError::Generic(format!(
+                    "index out of range: {}",
+                    indices[position]
+                )))
+            }
+        }
+    }
+    if indices.len() == 1 {
+        bounds[1] = length;
+    }
+    for pair in bounds.windows(2) {
+        if pair[0] > pair[1] {
+            return Err(FuncError::Generic(format!(
+                "invalid slice index: {} > {}",
+                pair[0], pair[1]
+            )));
+        }
+    }
+    let (start, end) = (bounds[0], bounds[1]);
+
+    match item {
+        Value::String(text) => match text.get(start..end) {
+            Some(cut) => Ok(Value::from(cut.to_owned())),
+            // Go would answer with invalid UTF-8 here; see this function's note.
+            None => Err(FuncError::Generic(format!(
+                "slice index {} is inside a character of {:?}",
+                if text.is_char_boundary(start) {
+                    end
+                } else {
+                    start
+                },
+                text
+            ))),
+        },
+        Value::Array(values) => Ok(Value::Array(values[start..end].to_vec())),
+        _ => unreachable!("the length match above rejected every other kind"),
+    }
+}
+
 pub fn index(args: &[Value]) -> Result<Value, FuncError> {
     if args.len() < 2 {
         return Err(FuncError::AtLeastXArgs("index".into(), 2));
@@ -554,6 +641,45 @@ fn cmp(left: &Value, right: &Value) -> Option<Ordering> {
 mod tests_mocked {
     use super::*;
     use std::collections::HashMap;
+
+    /// Go's builtin on a list. The conformance fixture renders without the helm
+    /// registry, so it has no `list` to build one with -- these go through the
+    /// function directly.
+    #[test]
+    fn slicing_a_list_follows_go() {
+        let list = Value::from(vec![1u64, 2, 3, 4, 5]);
+        let cut = |args: &[Value]| slice(args).map(|v| v.to_string());
+
+        assert_eq!(cut(std::slice::from_ref(&list)).unwrap(), "[1 2 3 4 5]");
+        assert_eq!(cut(&[list.clone(), val!(1u64)]).unwrap(), "[2 3 4 5]");
+        assert_eq!(
+            cut(&[list.clone(), val!(1u64), val!(3u64)]).unwrap(),
+            "[2 3]"
+        );
+        assert_eq!(cut(&[list.clone(), val!(5u64)]).unwrap(), "[]");
+        assert_eq!(cut(&[list.clone(), val!(2u64), val!(2u64)]).unwrap(), "[]");
+        // A third index is Go's capacity, which a template cannot observe; the point is
+        // that a list accepts it where a string does not.
+        assert_eq!(
+            cut(&[list.clone(), val!(1u64), val!(3u64), val!(4u64)]).unwrap(),
+            "[2 3]"
+        );
+
+        let message = |args: &[Value]| slice(args).unwrap_err().to_string();
+        assert_eq!(
+            message(&[list.clone(), val!(0u64), val!(9u64)]),
+            "index out of range: 9"
+        );
+        assert_eq!(
+            message(&[list.clone(), val!(3u64), val!(1u64)]),
+            "invalid slice index: 3 > 1"
+        );
+        assert_eq!(
+            message(&[list, val!(1u64), val!(2u64), val!(3u64), val!(4u64)]),
+            "cannot 4-index slice a []interface {}"
+        );
+        assert_eq!(message(&[]), "slice requires at least 1 argument(s)");
+    }
 
     #[test]
     fn test_macro() {

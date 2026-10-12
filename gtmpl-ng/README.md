@@ -131,6 +131,13 @@ Behaviour follows Go's `text/template`:
 -   **Map keys are iterated in sorted order**, which makes rendering deterministic.
 -   **`{{ else }}` on a `range`** runs only when the collection is empty, and ranging
     over nil takes that branch rather than failing.
+-   **`slice`** is Go's builtin: `slice x i j` is the half-open range, `slice x i` runs
+    to the end, and `slice x` is `x`. It takes a string or a list. Go indexes a string
+    by byte and will happily return invalid UTF-8 -- `slice "héllo" 1 2` is the single
+    byte `\xc3` there -- which a Rust `String` cannot hold, so an index that falls
+    inside a character is refused instead. **With `helm-functions` enabled, Helm's
+    `slice` replaces it**, taking a list and refusing a string, exactly as Sprig's
+    replaces Go's builtin in Helm itself.
 -   **`{{ break }}` and `{{ continue }}`** work inside a `{{ range }}`, as Go has since
     1.18. They are lexically scoped the way Go scopes them: one that no `{{ range }}`
     encloses is a parse error, and so is one in a `{{ define }}` or `{{ block }}` body
@@ -168,8 +175,6 @@ This is work in progress. Currently the following features are not supported:
 
 -   complex numbers
 -   `html` and `js` have not been implemented
--   Go's builtin `slice` is not in the default function set. `helm-functions` provides
-    a `slice`, with Helm's argument semantics rather than Go's
 -   numbers of different kinds compare permissively, Sprig-style rather than Go-style:
     `{{ eq 3.0 3 }}` and `{{ lt 5 3.5 }}` answer, where Go refuses with "incompatible
     types for comparison". A whole float is stored as an integer, which is what makes

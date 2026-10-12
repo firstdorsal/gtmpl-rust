@@ -9,9 +9,9 @@
 #     awk -F'\t' '!/^#/ && NF>0 {print $1}' go_conformance.txt |
 #         go run go_conformance.go > /tmp/go-side.txt
 #
-# Of 272 cases, 237 are byte-identical to Go. The 35 that are not break down as:
+# Of 294 cases, 249 are byte-identical to Go. The 45 that are not break down as:
 #
-#   22 the same failure reported in different words. Go writes
+#   31 the same failure reported in different words. Go writes
 #       `template: t:1: illegal number syntax: "0x1.8"`; this engine adds the line,
 #       column and length, which is the point of its error context. Same class, same
 #       cause, so these are not behavioural differences.
@@ -20,7 +20,7 @@
 #       the debug quoting differs -- Rust writes a control character as `\u{5}` where
 #       Go writes `\x05`. Verified with a byte comparison.
 #
-#   12  real differences, all of them deliberate:
+#   13  real differences, all of them deliberate:
 #
 #       `{{ printf "%s" 18446744073709551615 }}`
 #           Go's parser refuses the literal -- "overflows int" -- and never reaches
@@ -31,6 +31,12 @@
 #           Rendered with no data at all, Go treats a field of an invalid value as
 #           absent and prints `<nil>`; this engine reports that nil has no fields.
 #           See the README's limitations.
+#
+#       `{{ printf "%q" (slice "héllo" 1 2) }}`
+#           Go indexes a string by byte and is content to produce invalid UTF-8: the
+#           answer there is the single byte `\xc3`, half of the `é`. A Rust `String`
+#           cannot hold that, so the index is refused rather than answered with
+#           something else. Every index that lands on a character boundary agrees.
 #
 #       `{{ printf "%f" 1 }}`, `{{ printf "%e" 1 }}`, `{{ printf "%.*f" "x" 5 }}`,
 #       `{{ 1e6 }}`, `{{ 1234567.0 }}`, `{{ printf "%v" 1e19 }}`,
@@ -321,3 +327,25 @@
 {{ range 2 }}{{ block "b" . }}{{ break }}{{ end }}{{ end }}	ERR	template: b:1:34:5:{{break}} outside {{range}}
 {{ range 3 }}{{ break 1 }}{{ end }}	ERR	template: :1:23:1:unexpected "1" in {{break}}
 {{ range 3 }}{{ breaknot }}{{ end }}	ERR	template: :1:17:8:function breaknot not defined
+{{ slice "hello" 1 3 }}	OK	"el"
+{{ slice "hello" 1 }}	OK	"ello"
+{{ slice "hello" }}	OK	"hello"
+{{ len (slice "hello" 1 3) }}	OK	"2"
+{{ printf "%v" (slice "abcdef" 2 4) }}	OK	"cd"
+{{ printf "%q" (slice "héllo" 1 3) }}	OK	"\"é\""
+{{ slice (slice "hello" 1) 1 }}	OK	"llo"
+{{ slice "" 0 }}	OK	""
+{{ slice "" 0 0 }}	OK	""
+{{ printf "%q" (slice "hello" 5) }}	OK	"\"\""
+{{ printf "%q" (slice "hello" 2 2) }}	OK	"\"\""
+{{ $l := slice "abcde" 0 5 }}{{ slice $l 1 3 }}	OK	"bc"
+{{ slice "hello" 1 3 4 }}	ERR	template: :1:4:19:cannot 3-index slice a string
+{{ slice "hello" 3 1 }}	ERR	template: :1:4:17:invalid slice index: 3 > 1
+{{ slice "hello" 0 9 }}	ERR	template: :1:4:17:index out of range: 9
+{{ slice "hello" -1 }}	ERR	template: :1:4:16:index out of range: -1
+{{ slice "" 1 }}	ERR	template: :1:4:10:index out of range: 1
+{{ slice 5 1 }}	ERR	template: :1:4:9:can't slice item of type int
+{{ slice 1.5 1 }}	ERR	template: :1:4:11:can't slice item of type float64
+{{ slice true 1 }}	ERR	template: :1:4:12:can't slice item of type bool
+{{ slice nil 1 }}	ERR	template: :1:4:11:slice of untyped nil
+{{ printf "%q" (slice "héllo" 1 2) }}	ERR	template: :1:16:20:slice index 2 is inside a character of "héllo"

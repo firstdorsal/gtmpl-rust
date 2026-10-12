@@ -6,6 +6,14 @@ All three crates in this repository share one version and are released together.
 
 ### Added
 
+- **Go's builtin `slice`**, which was missing from the default function set, so a Go
+  template using it failed with "function slice not defined". It takes a string or a
+  list with Go's index rules and reports Go's messages for an index out of range, a
+  crossed pair, a third index on a string and a type that cannot be sliced. Where Go
+  indexes a string by byte and returns invalid UTF-8, an index inside a character is
+  refused instead -- a Rust `String` cannot hold the alternative. With
+  `helm-functions` enabled, Helm's `slice` replaces it, as Sprig's replaces the
+  builtin in Helm itself; a test now pins that precedence.
 - **`{{ break }}` and `{{ continue }}`**, as Go has had since 1.18. Scoped the way Go
   scopes them, which is lexically: one that no `{{ range }}` encloses is a parse error,
   as is one in a `{{ define }}` or `{{ block }}` body called from a range, or in the
