@@ -4,8 +4,21 @@ All three crates in this repository share one version and are released together.
 
 ## Unreleased
 
+### Added
+
+- **`{{ range }}` over an integer**, as Go has had since 1.22.
+  `{{ range 3 }}{{ . }}{{ end }}` is `012` and `{{ range $i := 3 }}` binds each index;
+  a count of zero or less takes the `{{ else }}` branch, the two-variable form is
+  refused the way Go refuses it, and a count above `i64` reports Go's "overflows int"
+  rather than trying to iterate. Checked case by case against Go 1.26.8 and recorded
+  in `go_conformance.txt`. A fractional float is still refused; a whole one iterates,
+  because this engine stores it as an integer.
+
 ### Fixed
 
+- **`range` over something it cannot iterate said so in Rust's `Debug`.** The message
+  read `invalid range Number(Number { n: U(3) })`, handing the reader this crate's
+  internals; it is Go's `range can't iterate over 3` now.
 - **`mowsDigest` could never succeed.** All four of its methods — `MD5`, `SHA1`,
   `SHA256`, `SHA512` — read the raw digest bytes as UTF-8, which they are not for any
   practical input, so every call returned "Invalid hash". It returns hexadecimal now,

@@ -6,7 +6,7 @@ use crate::node::*;
 use crate::template::Template;
 use crate::utils::{is_absent, is_true};
 
-use gtmpl_value_ng::{Func, Value};
+use gtmpl_value_ng::{Func, NumberKind, Value};
 
 const MAX_TEMPLATE_DEPTH: usize = 100_000;
 
@@ -610,6 +610,28 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                         state.one_iteration(Value::from(index), value.clone(), range)?;
                     }
                     values.is_empty()
+                }
+                // Go 1.22: an integer iterates from zero, with the index as dot. A
+                // whole float is stored as an integer here, so `{{range 3.0}}`
+                // iterates where Go refuses it -- the same collapse that lets
+                // `printf "%f" 3` answer. A fractional one still refuses.
+                Value::Number(number) => {
+                    let count = match number.kind() {
+                        NumberKind::Signed(signed) => signed,
+                        NumberKind::Unsigned(unsigned) => i64::try_from(unsigned)
+                            .map_err(|_| ExecError::RangeOverflowsInt(val.clone()))?,
+                        NumberKind::Float(_) => return Err(ExecError::InvalidRange(val)),
+                    };
+                    // Go takes one variable from an integer range, not two: there is
+                    // no value to pair the index with.
+                    if range.pipe.decl.len() > 1 {
+                        return Err(ExecError::RangeOverOneVariable(val));
+                    }
+                    for index in 0..count {
+                        let index = Value::from(index);
+                        state.one_iteration(index.clone(), index, range)?;
+                    }
+                    count <= 0
                 }
                 Value::Nil | Value::NoValue => true,
                 _ => return Err(ExecError::InvalidRange(val)),

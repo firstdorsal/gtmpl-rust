@@ -9,9 +9,9 @@
 #     awk -F'\t' '!/^#/ && NF>0 {print $1}' go_conformance.txt |
 #         go run go_conformance.go > /tmp/go-side.txt
 #
-# Of 237 cases, 217 are byte-identical to Go. The 20 that are not break down as:
+# Of 250 cases, 224 are byte-identical to Go. The 26 that are not break down as:
 #
-#   8  the same failure reported in different words. Go writes
+#   13 the same failure reported in different words. Go writes
 #       `template: t:1: illegal number syntax: "0x1.8"`; this engine adds the line,
 #       column and length, which is the point of its error context. Same class, same
 #       cause, so these are not behavioural differences.
@@ -20,7 +20,7 @@
 #       the debug quoting differs -- Rust writes a control character as `\u{5}` where
 #       Go writes `\x05`. Verified with a byte comparison.
 #
-#   11  real differences, all of them deliberate:
+#   12  real differences, all of them deliberate:
 #
 #       `{{ printf "%s" 18446744073709551615 }}`
 #           Go's parser refuses the literal -- "overflows int" -- and never reaches
@@ -33,13 +33,16 @@
 #           See the README's limitations.
 #
 #       `{{ printf "%f" 1 }}`, `{{ printf "%e" 1 }}`, `{{ printf "%.*f" "x" 5 }}`,
-#       `{{ 1e6 }}`, `{{ 1234567.0 }}`, `{{ printf "%v" 1e19 }}`
-#           All six follow from one decision: a whole float is stored as an integer so
-#           that `{{ 3.0 }}` renders `3` the way Go does. A float verb then cannot be
-#           refused on a true integer, and a whole float never reaches the exponent
-#           notation Go switches to at 1e6. The alternative is to keep floats apart,
-#           which would change `as_u64()` on every whole float a caller builds and
-#           move output such as `1000000` to `1e+06`. See the README's limitations.
+#       `{{ 1e6 }}`, `{{ 1234567.0 }}`, `{{ printf "%v" 1e19 }}`,
+#       `{{ range 3.0 }}{{ . }}{{ end }}`
+#           All seven follow from one decision: a whole float is stored as an integer
+#           so that `{{ 3.0 }}` renders `3` the way Go does. A float verb then cannot
+#           be refused on a true integer, a whole float never reaches the exponent
+#           notation Go switches to at 1e6, and `range` cannot tell `3.0` from `3` --
+#           Go refuses to iterate a float, this engine iterates the integer it was
+#           collapsed to. The alternative is to keep floats apart, which would change
+#           `as_u64()` on every whole float a caller builds and move output such as
+#           `1000000` to `1e+06`. See the README's limitations.
 #
 # Six cases are deliberately not here: a width or precision near Go's million-digit
 # cap produces a megabyte of output each, which is not worth shipping in a fixture.
@@ -283,3 +286,16 @@
 {{ printf "%.[1]d" 1 }}	OK	"1"
 {{ printf "%[1]*d" 2 3 }}	OK	" 3"
 {{ printf "%*[1]d" 2 3 }}	OK	" 2"
+{{ range 3 }}{{ . }}{{ end }}	OK	"012"
+{{ range $i := 3 }}{{ $i }},{{ end }}	OK	"0,1,2,"
+{{ range 1 }}{{ . }}{{ end }}	OK	"0"
+{{ range 2 }}[{{ . }}]{{ end }}	OK	"[0][1]"
+{{ range 0 }}x{{ else }}empty{{ end }}	OK	"empty"
+{{ range -1 }}x{{ else }}empty{{ end }}	OK	"empty"
+{{ range -3 }}x{{ else }}empty{{ end }}	OK	"empty"
+{{ range 3.0 }}{{ . }}{{ end }}	OK	"012"
+{{ range $i, $v := 3 }}{{ $i }}={{ $v }},{{ end }}	ERR	template: :1:10:11:can't use 3 to iterate over more than one variable
+{{ range 1.5 }}x{{ end }}	ERR	template: :1:10:3:range can't iterate over 1.5
+{{ range "ab" }}x{{ end }}	ERR	template: :1:10:4:range can't iterate over ab
+{{ range 9223372036854775808 }}x{{ end }}	ERR	template: :1:10:19:9223372036854775808 overflows int
+{{ range 18446744073709551615 }}x{{ end }}	ERR	template: :1:10:20:18446744073709551615 overflows int

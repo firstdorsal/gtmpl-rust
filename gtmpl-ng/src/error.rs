@@ -168,8 +168,15 @@ pub enum ExecError {
     Utf8ConversionFailed(FromUtf8Error),
     #[error("empty var stack")]
     EmptyStack,
-    #[error("invalid range {0:?}")]
+    // Go's wording, and through `Display` rather than `Debug`: the message used to
+    // read `invalid range Number(Number { n: U(3) })`, which hands the reader this
+    // crate's internals instead of the value they wrote.
+    #[error("range can't iterate over {0}")]
     InvalidRange(Value),
+    #[error("{0} overflows int")]
+    RangeOverflowsInt(Value),
+    #[error("can't use {0} to iterate over more than one variable")]
+    RangeOverOneVariable(Value),
     #[error("pipeline must yield a String")]
     PipelineMustYieldString,
     #[error("template {0} not defined")]
