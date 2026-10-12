@@ -11,7 +11,7 @@ resolver = "2"
 # The three crates are released together under one version, so a tag means the same
 # thing for all of them and `gtmpl-ng` never depends on a value type older than itself.
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 authors = [
     "Florian Dieminger <me@fiji-flo.de>",
     "Paul Colin Hennig <8d_fvfmaa-o2wf_79aqig6g2ki6-09ffkeqmyo3d@vindelicum.eu>",
@@ -32,8 +32,8 @@ edition = "2021"
 rust-version = "1.85"
 
 [workspace.dependencies]
-gtmpl_value_ng = { version = "0.9.0", path = "gtmpl_value_ng" }
-gtmpl_derive_ng = { version = "0.9.0", path = "gtmpl_derive_ng" }
+gtmpl_value_ng = { version = "0.10.0", path = "gtmpl_value_ng" }
+gtmpl_derive_ng = { version = "0.10.0", path = "gtmpl_derive_ng" }
 anyhow = "1"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }

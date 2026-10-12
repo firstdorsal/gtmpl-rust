@@ -16,7 +16,7 @@ function set that the original does not have.
 
 ```toml
 [dependencies]
-gtmpl-ng = "0.9"
+gtmpl-ng = "0.10"
 ```
 
 Rendering a template needs nothing else — `Value`, `Func`, `FuncError` and the rest are
@@ -24,10 +24,10 @@ re-exported from `gtmpl-ng` itself. Two optional crates:
 
 ```toml
 [dependencies]
-gtmpl-ng = { version = "0.9", features = ["helm-functions"] }
+gtmpl-ng = { version = "0.10", features = ["helm-functions"] }
 # only for #[derive(Gtmpl)], to use your own structs as a context
-gtmpl_derive_ng = "0.9"
-gtmpl_value_ng = "0.9"
+gtmpl_derive_ng = "0.10"
+gtmpl_value_ng = "0.10"
 ```
 
 ## Hello world
@@ -49,9 +49,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-gtmpl-ng = { version = "0.9", features = ["all-functions", "gtmpl_dynamic_template"] }
-gtmpl_derive_ng = "0.9"
-gtmpl_value_ng = "0.9"
+gtmpl-ng = { version = "0.10", features = ["all-functions", "gtmpl_dynamic_template"] }
+gtmpl_derive_ng = "0.10"
+gtmpl_value_ng = "0.10"
 ```
 
 ```rust

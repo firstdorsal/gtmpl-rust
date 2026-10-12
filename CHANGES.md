@@ -2,7 +2,7 @@
 
 All three crates in this repository share one version and are released together.
 
-## Unreleased
+## [0.10.0] - 2026-10-12
 
 ### Added
 

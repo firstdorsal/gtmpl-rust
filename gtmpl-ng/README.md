@@ -19,10 +19,10 @@ Add the following dependency to your Cargo manifest…
 
 ```toml
 [dependencies]
-gtmpl-ng = "0.9"
+gtmpl-ng = "0.10"
 # Only for `#[derive(Gtmpl)]`, which generates the conversion for a struct.
-gtmpl_derive_ng = "0.9"
-gtmpl_value_ng = "0.9"
+gtmpl_derive_ng = "0.10"
+gtmpl_value_ng = "0.10"
 ```
 
 `gtmpl_value_ng`'s whole surface is re-exported here -- `Value`, `Number`,
@@ -205,7 +205,7 @@ Enable `helm-functions` to get 152 Helm-compatible template functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.9"
+version = "0.10"
 features = ["helm-functions"]
 ```
 
@@ -234,7 +234,7 @@ Enable `mows-functions` to get 3 additional mows-specific functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.9"
+version = "0.10"
 features = ["mows-functions"]
 ```
 
@@ -249,7 +249,7 @@ Enable `all-functions` to get both Helm and mows functions:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.9"
+version = "0.10"
 features = ["all-functions"]
 ```
 
@@ -267,7 +267,7 @@ Enable `gtmpl_dynamic_template` in your `Cargo.toml`:
 
 ```toml
 [dependencies.gtmpl-ng]
-version = "0.9"
+version = "0.10"
 features = ["gtmpl_dynamic_template"]
 ```
 
