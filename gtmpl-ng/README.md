@@ -131,6 +131,11 @@ Behaviour follows Go's `text/template`:
 -   **Map keys are iterated in sorted order**, which makes rendering deterministic.
 -   **`{{ else }}` on a `range`** runs only when the collection is empty, and ranging
     over nil takes that branch rather than failing.
+-   **`{{ break }}` and `{{ continue }}`** work inside a `{{ range }}`, as Go has since
+    1.18. They are lexically scoped the way Go scopes them: one that no `{{ range }}`
+    encloses is a parse error, and so is one in a `{{ define }}` or `{{ block }}` body
+    called from a range, or in the range's own `{{ else }}` branch. An `{{ if }}` or
+    `{{ with }}` in between is not a barrier.
 -   **`{{ range }}` over an integer** counts from zero, as Go has since 1.22:
     `{{ range 3 }}{{ . }}{{ end }}` is `012`, and `{{ range $i := 3 }}` binds `$i` to
     each index. A negative count is empty, so it takes the `{{ else }}` branch, and the
@@ -162,7 +167,6 @@ than silently skipped (see `tests/feature_gates.rs`); run the whole suite with
 This is work in progress. Currently the following features are not supported:
 
 -   complex numbers
--   `{{break}}` and `{{continue}}` inside a `{{range}}`, which Go has had since 1.18
 -   `html` and `js` have not been implemented
 -   Go's builtin `slice` is not in the default function set. `helm-functions` provides
     a `slice`, with Helm's argument semantics rather than Go's

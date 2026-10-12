@@ -6,6 +6,12 @@ All three crates in this repository share one version and are released together.
 
 ### Added
 
+- **`{{ break }}` and `{{ continue }}`**, as Go has had since 1.18. Scoped the way Go
+  scopes them, which is lexically: one that no `{{ range }}` encloses is a parse error,
+  as is one in a `{{ define }}` or `{{ block }}` body called from a range, or in the
+  range's own `{{ else }}`. An `{{ if }}` or `{{ with }}` in between is not a barrier,
+  and a `{{ break }}` in a nested range ends only that one. All twenty-two cases that
+  pin this went through Go 1.26.8 first and are recorded in `go_conformance.txt`.
 - **`{{ range }}` over an integer**, as Go has had since 1.22.
   `{{ range 3 }}{{ . }}{{ end }}` is `012` and `{{ range $i := 3 }}` binds each index;
   a count of zero or less takes the `{{ else }}` branch, the two-variable form is

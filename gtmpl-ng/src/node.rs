@@ -105,7 +105,11 @@ nodes!(
     RangeNode,
     Range,
     TemplateNode,
-    Template
+    Template,
+    BreakNode,
+    Break,
+    ContinueNode,
+    Continue
 );
 
 pub type Pos = usize;
@@ -504,6 +508,52 @@ impl DotNode {
 impl Display for DotNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
         write!(f, ".")
+    }
+}
+
+// `{{break}}`, which ends the innermost enclosing `{{range}}`. It carries no data and
+// exists so the executor can tell the construct apart from an action; the parser has
+// already refused one that no `{{range}}` encloses.
+node!(BreakNode {});
+
+impl BreakNode {
+    pub fn new(tr: TreeId, pos: Pos, line: usize, col: usize, len: usize) -> BreakNode {
+        BreakNode {
+            typ: NodeType::Break,
+            tr,
+            pos,
+            line,
+            col,
+            len,
+        }
+    }
+}
+
+impl Display for BreakNode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "{{{{break}}}}")
+    }
+}
+
+// `{{continue}}`, which ends this iteration of the innermost `{{range}}`.
+node!(ContinueNode {});
+
+impl ContinueNode {
+    pub fn new(tr: TreeId, pos: Pos, line: usize, col: usize, len: usize) -> ContinueNode {
+        ContinueNode {
+            typ: NodeType::Continue,
+            tr,
+            pos,
+            line,
+            col,
+            len,
+        }
+    }
+}
+
+impl Display for ContinueNode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "{{{{continue}}}}")
     }
 }
 

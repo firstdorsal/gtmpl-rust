@@ -42,6 +42,8 @@ lazy_static! {
         let mut m = HashMap::new();
         m.insert(".", ItemType::ItemDot);
         m.insert("block", ItemType::ItemBlock);
+        m.insert("break", ItemType::ItemBreak);
+        m.insert("continue", ItemType::ItemContinue);
         m.insert("define", ItemType::ItemDefine);
         m.insert("end", ItemType::ItemEnd);
         m.insert("else", ItemType::ItemElse);
@@ -81,6 +83,8 @@ pub enum ItemType {
     // Keywords, appear after all the rest.
     ItemKeyword,  // used only to delimit the keywords
     ItemBlock,    // block keyword
+    ItemBreak,    // break keyword
+    ItemContinue, // continue keyword
     ItemDot,      // the cursor, spelled '.'
     ItemDefine,   // define keyword
     ItemElse,     // else keyword

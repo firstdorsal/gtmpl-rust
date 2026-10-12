@@ -8,6 +8,18 @@ use crate::utils::{is_absent, is_true};
 
 use gtmpl_value_ng::{Func, NumberKind, Value};
 
+/// What a list did: ran to its end, or was cut short by `{{break}}` or `{{continue}}`.
+///
+/// The signal travels outwards through `{{if}}`, `{{with}}` and nested lists until a
+/// `{{range}}` acts on it. The parser has already refused one that no `{{range}}`
+/// encloses, so it can never reach the top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Done,
+    Break,
+    Continue,
+}
+
 const MAX_TEMPLATE_DEPTH: usize = 100_000;
 
 struct Variable {
@@ -214,16 +226,21 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         self.var_ref(key).cloned()
     }
 
-    fn walk_list(&mut self, ctx: &Context, node: &'a ListNode) -> Result<(), ExecError> {
+    fn walk_list(&mut self, ctx: &Context, node: &'a ListNode) -> Result<Flow, ExecError> {
         for n in &node.nodes {
-            self.walk(ctx, n)?;
+            // A `{{break}}` or `{{continue}}` abandons the rest of the list and keeps
+            // travelling outwards until a `{{range}}` catches it.
+            match self.walk(ctx, n)? {
+                Flow::Done => {}
+                interrupted => return Ok(interrupted),
+            }
         }
-        Ok(())
+        Ok(Flow::Done)
     }
 
     // Top level walk function. Steps through the major parts for the template strcuture and
     // writes to the output.
-    fn walk(&mut self, ctx: &Context, node: &'a Nodes) -> Result<(), ExecError> {
+    fn walk(&mut self, ctx: &Context, node: &'a Nodes) -> Result<Flow, ExecError> {
         self.node = Some(node);
         match *node {
             Nodes::Action(ref n) => {
@@ -233,17 +250,27 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                 if n.pipe.decl.is_empty() {
                     self.print_value(&val)?;
                 }
-                Ok(())
+                Ok(Flow::Done)
             }
             Nodes::If(_) | Nodes::With(_) => self.walk_if_or_with(node, ctx),
+            // The range is where the signal stops: it acts on it and reports a
+            // finished list to whatever encloses it.
             Nodes::Range(ref n) => self
                 .walk_range(ctx, n)
-                .map_err(|e| self.wrap_error(e, node)),
+                .map_err(|e| self.wrap_error(e, node))
+                .map(|()| Flow::Done),
             Nodes::List(ref n) => self.walk_list(ctx, n),
-            Nodes::Text(ref n) => write!(self.writer, "{}", n).map_err(ExecError::IOError),
+            Nodes::Text(ref n) => write!(self.writer, "{}", n)
+                .map_err(ExecError::IOError)
+                .map(|()| Flow::Done),
+            // A `{{define}}` body is its own template, so the parser has already
+            // refused a `{{break}}` in one: nothing can escape through here.
             Nodes::Template(ref n) => self
                 .walk_template(ctx, n)
-                .map_err(|e| self.wrap_error(e, node)),
+                .map_err(|e| self.wrap_error(e, node))
+                .map(|()| Flow::Done),
+            Nodes::Break(_) => Ok(Flow::Break),
+            Nodes::Continue(_) => Ok(Flow::Continue),
             _ => Err(ExecError::UnknownNode(Box::new(node.clone()))),
         }
     }
@@ -282,7 +309,9 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                     vars,
                     depth: self.depth + 1,
                 };
-                return new_state.walk(&context, root);
+                // A `{{break}}` cannot occur in a template body -- the parser
+                // refuses one outside a `{{range}}`, and a body is its own template.
+                return new_state.walk(&context, root).map(|_| ());
             }
         }
         Err(ExecError::TemplateNotDefined(name))
@@ -543,7 +572,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
     }
 
     // Walks an `if` or `with` node. They behave the same, except that `with` sets dot.
-    fn walk_if_or_with(&mut self, node: &'a Nodes, ctx: &Context) -> Result<(), ExecError> {
+    fn walk_if_or_with(&mut self, node: &'a Nodes, ctx: &Context) -> Result<Flow, ExecError> {
         let pipe = match *node {
             Nodes::If(ref n) | Nodes::With(ref n) => &n.pipe,
             _ => return Err(ExecError::ExpectedIfOrWith(Box::new(node.clone()))),
@@ -552,26 +581,26 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             let val = state
                 .eval_pipeline(ctx, pipe)
                 .map_err(|e| state.wrap_error(e, node))?;
+            // Neither construct is a barrier: a `{{break}}` inside a `{{with}}` ends
+            // the `{{range}}` around it, which is Go's behaviour.
             if is_true(&val) {
                 match *node {
-                    Nodes::If(ref n) => state.walk_list(ctx, &n.list)?,
+                    Nodes::If(ref n) => state.walk_list(ctx, &n.list),
                     Nodes::With(ref n) => {
                         let ctx = Context { dot: val };
-                        state.walk_list(&ctx, &n.list)?;
+                        state.walk_list(&ctx, &n.list)
                     }
-                    _ => {}
+                    _ => Ok(Flow::Done),
                 }
             } else {
                 match *node {
-                    Nodes::If(ref n) | Nodes::With(ref n) => {
-                        if let Some(ref otherwise) = n.else_list {
-                            state.walk_list(ctx, otherwise)?;
-                        }
-                    }
-                    _ => {}
+                    Nodes::If(ref n) | Nodes::With(ref n) => match n.else_list {
+                        Some(ref otherwise) => state.walk_list(ctx, otherwise),
+                        None => Ok(Flow::Done),
+                    },
+                    _ => Ok(Flow::Done),
                 }
             }
-            Ok(())
         })
     }
 
@@ -580,7 +609,7 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         key: Value,
         val: Value,
         range: &'a RangeNode,
-    ) -> Result<(), ExecError> {
+    ) -> Result<Flow, ExecError> {
         match range.pipe.decl.as_slice() {
             [value] => self.assign_var(&value.ident[0], val.clone())?,
             [key_var, value] => {
@@ -591,6 +620,12 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
         }
         let ctx = Context { dot: val };
         self.in_new_scope(|state| state.walk_list(&ctx, &range.list))
+            // `{{continue}}` has done its work by ending the body; only `{{break}}`
+            // still concerns the loop.
+            .map(|flow| match flow {
+                Flow::Continue => Flow::Done,
+                other => other,
+            })
     }
 
     fn walk_range(&mut self, ctx: &Context, range: &'a RangeNode) -> Result<(), ExecError> {
@@ -601,13 +636,20 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                     let mut entries: Vec<_> = map.iter().collect();
                     entries.sort_by_key(|(key, _)| *key);
                     for (key, value) in entries {
-                        state.one_iteration(Value::from(key.clone()), value.clone(), range)?;
+                        let flow =
+                            state.one_iteration(Value::from(key.clone()), value.clone(), range)?;
+                        if flow == Flow::Break {
+                            break;
+                        }
                     }
                     map.is_empty()
                 }
                 Value::Array(ref values) => {
                     for (index, value) in values.iter().enumerate() {
-                        state.one_iteration(Value::from(index), value.clone(), range)?;
+                        let flow = state.one_iteration(Value::from(index), value.clone(), range)?;
+                        if flow == Flow::Break {
+                            break;
+                        }
                     }
                     values.is_empty()
                 }
@@ -629,7 +671,9 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
                     }
                     for index in 0..count {
                         let index = Value::from(index);
-                        state.one_iteration(index.clone(), index, range)?;
+                        if state.one_iteration(index.clone(), index, range)? == Flow::Break {
+                            break;
+                        }
                     }
                     count <= 0
                 }
@@ -638,6 +682,8 @@ impl<'a, 'b, 'c, T: Write> State<'a, 'b, 'c, T> {
             };
             if empty {
                 if let Some(ref otherwise) = range.else_list {
+                    // The parser refuses a `{{break}}` here, as Go does: this branch
+                    // runs precisely when there was nothing to iterate.
                     state.walk_list(ctx, otherwise)?;
                 }
             }

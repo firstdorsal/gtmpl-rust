@@ -14,8 +14,8 @@ fn formatting_matches_the_recorded_go_behaviour() {
     // Pinned rather than bounded: a case commented out with the file's own `#` would
     // otherwise vanish from the run without a trace, which is the one way this fixture
     // can quietly stop covering what it says it covers.
-    const RECORDED_CASES: usize = 250;
-    const RECORDED_ERROR_CASES: usize = 17;
+    const RECORDED_CASES: usize = 272;
+    const RECORDED_ERROR_CASES: usize = 26;
 
     let mut checked = 0;
     let mut error_cases = 0;
