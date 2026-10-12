@@ -152,6 +152,15 @@ pub fn repeat(args: &[Value]) -> Result<Value, FuncError> {
     let times = times
         .parse::<usize>()
         .map_err(|_| FuncError::Generic("Invalid number".to_string()))?;
+    // The product is what allocates, so bound that rather than the count: a hundred
+    // repeats of a megabyte is the same memory as a million repeats of a byte.
+    let total = times.saturating_mul(value.len());
+    if total > crate::helm_functions::TOO_MANY {
+        return Err(FuncError::Generic(format!(
+            "repeat: {total} characters is more than the {} this allows",
+            crate::helm_functions::TOO_MANY
+        )));
+    }
     let value = value.repeat(times);
     Ok(Value::from(value))
 }
@@ -371,6 +380,7 @@ pub fn rand_alpha(args: &[Value]) -> Result<Value, FuncError> {
 
     let charset: Vec<u8> = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".to_vec();
 
+    let length = crate::helm_functions::bounded_count(length as i64, "characters", "rand")?;
     let generated: String = (0..length)
         .map(|_| {
             let idx = rng.random_range(0..charset.len());
@@ -393,6 +403,7 @@ pub fn rand_numeric(args: &[Value]) -> Result<Value, FuncError> {
 
     let charset: Vec<u8> = b"0123456789".to_vec();
 
+    let length = crate::helm_functions::bounded_count(length as i64, "characters", "rand")?;
     let generated: String = (0..length)
         .map(|_| {
             let idx = rng.random_range(0..charset.len());
@@ -416,6 +427,7 @@ pub fn rand_alpha_num(args: &[Value]) -> Result<Value, FuncError> {
     let charset: Vec<u8> =
         b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".to_vec();
 
+    let length = crate::helm_functions::bounded_count(length as i64, "characters", "rand")?;
     let generated: String = (0..length)
         .map(|_| {
             let idx = rng.random_range(0..charset.len());
@@ -438,6 +450,7 @@ pub fn rand_ascii(args: &[Value]) -> Result<Value, FuncError> {
 
     let charset: Vec<u8> = b" !#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~".to_vec();
 
+    let length = crate::helm_functions::bounded_count(length as i64, "characters", "rand")?;
     let generated: String = (0..length)
         .map(|_| {
             let idx = rng.random_range(0..charset.len());
@@ -552,6 +565,7 @@ pub fn indent(args: &[Value]) -> Result<Value, FuncError> {
 
     let value = value.to_string();
 
+    let indent = crate::helm_functions::bounded_count(indent as i64, "spaces", "indent")?;
     let indent_string = " ".repeat(indent);
 
     let mut result = String::new();

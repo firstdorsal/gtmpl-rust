@@ -74,6 +74,8 @@ pub fn random_string(args: &[Value]) -> Result<Value, FuncError> {
     }
     let mut rng = rand::rng();
 
+    // `length` parsed as a `u16` above, so it cannot exceed 65535 -- the bound the
+    // other generators get from `utils::TOO_MANY` is already implicit here.
     let generated: String = (0..length)
         .map(|_| {
             let idx = rand::Rng::random_range(&mut rng, 0..charset.len());

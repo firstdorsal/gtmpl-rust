@@ -131,6 +131,12 @@ Behaviour follows Go's `text/template`:
 -   **Map keys are iterated in sorted order**, which makes rendering deterministic.
 -   **`{{ else }}` on a `range`** runs only when the collection is empty, and ranging
     over nil takes that branch rather than failing.
+-   **A function that generates cannot be asked for more than a million.** `repeat`,
+    `until`, `untilStep`, `seq`, `indent` and the `rand*` family refuse a count past
+    `1000000` with an error rather than allocating for it. Go recovers a panicking
+    template function into a template error; this engine returns `Result`, so a request
+    that would exhaust memory has to be refused rather than attempted. It is the same
+    line `printf` holds on a width or precision.
 -   **`slice`** is Go's builtin: `slice x i j` is the half-open range, `slice x i` runs
     to the end, and `slice x` is `x`. It takes a string or a list. Go indexes a string
     by byte and will happily return invalid UTF-8 -- `slice "héllo" 1 2` is the single

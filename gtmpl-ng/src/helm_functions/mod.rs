@@ -20,6 +20,35 @@ pub mod string;
 pub mod types;
 pub mod utils;
 
+use gtmpl_value_ng::FuncError;
+
+/// The largest number of elements or characters a template may ask a function to
+/// create.
+///
+/// Go recovers a panic inside a template function and reports it as a template error.
+/// This engine returns `Result` instead, so a function that panics or exhausts memory
+/// escapes the type the API promises -- `{{ until 9999999999 }}` and
+/// `{{ repeat 9999999999 "x" }}` both took the process down with a core dump, from a
+/// template literal alone and with no data involved.
+///
+/// The number is Go's own: `fmt` refuses a width or precision past a million for the
+/// same reason, and `printf.rs` already holds that line.
+pub const TOO_MANY: usize = 1_000_000;
+
+/// Reads a count a template asked for, refusing one large enough to exhaust memory.
+///
+/// `what` names the thing being counted, so the message says which argument to look
+/// at: "repeat: 9999999999 characters is more than the 1000000 this allows".
+pub fn bounded_count(count: i64, what: &str, function: &str) -> Result<usize, FuncError> {
+    let count = usize::try_from(count).unwrap_or(0);
+    if count > TOO_MANY {
+        return Err(FuncError::Generic(format!(
+            "{function}: {count} {what} is more than the {TOO_MANY} this allows"
+        )));
+    }
+    Ok(count)
+}
+
 use crate::Func;
 
 // Re-export commonly used conversion functions
